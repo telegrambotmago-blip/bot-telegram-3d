@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: aliexpress-sem-taxa-bot
+    runtime: python
+    pythonVersion: 3.11
+    
+    # Comando para iniciar o bot
+    startCommand: python main.py
+    
+    # Plano gratuito
+    plan: free
+    
+    # Variáveis de ambiente (IMPORTANTE: Configure no painel do Render)
+    envVars:
+      - key: TELEGRAM_TOKEN
+        scope: run
+        sync: false
+      - key: GEMINI_API_KEY
+        scope: run
+        sync: false
+      - key: ALI_APP_KEY
+        scope: run
+        sync: false
+      - key: ALI_APP_SECRET
+        scope: run
+        sync: false
+      - key: ALI_TRACKING_ID
+        scope: run
+        sync: false
+    
+    # Configuração de build
+    buildCommand: pip install -r requirements.txt
+    
+    # Manter o serviço sempre ativo
+    # Nota: O servidor Flask na porta 10000 mantém o bot vivo
+    # Render não hiberna serviços web, apenas serviços cron
