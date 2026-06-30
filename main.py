@@ -5,6 +5,16 @@ import random
 import hashlib
 import html as html_mod
 import logging
+
+# --- TESTE DE DIAGNÓSTICO ---
+print("--- DIAGNÓSTICO DE VARIÁVEIS ---")
+print(f"Variáveis encontradas: {list(os.environ.keys())}")
+if "TELEGRAM_TOKEN" in os.environ:
+    print("✅ TELEGRAM_TOKEN encontrado!")
+else:
+    print("❌ TELEGRAM_TOKEN NÃO FOI ENCONTRADO!")
+print("-------------------------------")
+
 import threading
 import datetime
 import schedule
