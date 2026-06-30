@@ -1,0 +1,67 @@
+# Arquivos de estado do bot (dados em tempo de execução)
+participants.json
+audit.log
+config.json
+
+# Arquivos de cache Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Ambientes virtuais
+venv/
+ENV/
+env/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Variáveis de ambiente
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Arquivos do sistema
+.DS_Store
+Thumbs.db
+
+# Arquivos de teste
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node.js (para evitar resíduos futuros)
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
