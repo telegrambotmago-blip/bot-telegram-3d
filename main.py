@@ -819,7 +819,18 @@ def _executar_teste(nome: str, funcao) -> str:
 
 @bot.message_handler(commands=["testar", "start"])
 def cmd_menu(message: telebot.types.Message) -> None:
+    """Handler para /start e /testar. Detecta parâmetro 'sorteio' para auto-inscrição."""
     logger.info("Comando recebido: /%s (user: %s)", message.text.lstrip("/").split()[0], message.from_user.id)
+    
+    # Verifica se foi chamado com parâmetro 'sorteio' (deep link)
+    args = message.text.split()
+    if len(args) > 1 and args[1] == "sorteio":
+        # Auto-executa /participar quando vem do deep link
+        logger.info("Deep link detectado: sorteio. Executando /participar automaticamente para user %s", message.from_user.id)
+        cmd_participar(message)
+        return
+    
+    # Menu de teste padrão
     bot.send_message(
         message.chat.id,
         "🧪 Modo de Teste — escolha o que disparar agora:",
