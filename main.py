@@ -12,6 +12,17 @@ import feedparser
 import requests
 import telebot
 from google import genai
+from flask import Flask
+
+# --- SERVIDOR PARA MANTER ONLINE 24/7 ---
+server = Flask(__name__)
+
+@server.route('/')
+def health_check():
+    return "Bot is alive!", 200
+
+def run_flask():
+    server.run(host='0.0.0.0', port=10000)
 
 # ---------------------------------------------------------------------------
 # Configuração de logging
@@ -2074,6 +2085,12 @@ def _loop_agendamento() -> None:
 
 def main() -> None:
     logger.info("🤖 Bot de Impressão 3D iniciando...")
+
+    
+    # Inicia o servidor Flask em uma thread separada para a Render não desligar o bot
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("✅ Servidor de monitoramento ativo na porta 10000")
 
     # Remove webhook e aguarda conexões anteriores expirarem no lado do Telegram
     for tentativa in range(1, 6):
