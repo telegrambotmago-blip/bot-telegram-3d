@@ -228,8 +228,10 @@ KEYWORDS = [
 ]
 _keyword_index = 0
 
-PRECO_MIN = 250000
-PRECO_MAX = 70000000
+# Preços em centavos de real (USD $20 ≈ R$ 75 = 7500 centavos)
+# Filtramos apenas produtos 3D de qualidade (filamentos, resinas, impressoras, peças)
+PRECO_MIN = 7500      # R$ 75 / $20 USD (mínimo)
+PRECO_MAX = 500000000 # R$ 5.000.000 (sem limite prático)
 
 # ---------------------------------------------------------------------------
 # Feeds RSS de impressão 3D
@@ -298,15 +300,49 @@ def buscar_produtos_aliexpress(keyword: str) -> list[dict]:
 
 
 def filtrar_por_preco(produtos: list[dict]) -> list[dict]:
-    """Filtra produtos dentro da faixa de preço desejada."""
+    """
+    Filtra produtos dentro da faixa de preço desejada e por categorias 3D.
+    
+    Critérios:
+    - Preço entre PRECO_MIN ($20 USD / R$ 75) e PRECO_MAX
+    - Produto deve ser de categorias 3D (filamentos, resinas, impressoras, peças)
+    """
+    # Palavras-chave que indicam produtos 3D de qualidade
+    CATEGORIAS_3D = [
+        "filament", "filamento", "pla", "abs", "petg", "nylon",
+        "resin", "resina", "uv", "epoxy",
+        "printer", "impressora", "creality", "elegoo", "anycubic", "bambu", "sunlu",
+        "nozzle", "bico", "hotend", "extruder", "extrusora",
+        "build plate", "plataforma", "bed", "cama",
+        "parts", "peças", "component", "componente",
+        "fdm", "sla", "dlp", "lcd",
+    ]
+    
     filtrados = []
     for p in produtos:
         try:
             preco = float(p.get("sale_price", 0))
-            if PRECO_MIN <= preco <= PRECO_MAX:
+            
+            # Verifica faixa de preço
+            if not (PRECO_MIN <= preco <= PRECO_MAX):
+                continue
+            
+            # Verifica se é produto 3D (por nome ou descrição)
+            titulo = str(p.get("title", "")).lower()
+            descricao = str(p.get("description", "")).lower()
+            texto_completo = f"{titulo} {descricao}"
+            
+            # Verifica se contém palavras-chave de categorias 3D
+            eh_categoria_3d = any(palavra in texto_completo for palavra in CATEGORIAS_3D)
+            
+            if eh_categoria_3d:
                 filtrados.append(p)
-        except (ValueError, TypeError):
+                logger.debug(f"✅ Produto 3D filtrado: {titulo[:50]} - R$ {preco/100:.2f}")
+        except (ValueError, TypeError) as e:
+            logger.debug(f"Erro ao filtrar produto: {e}")
             continue
+    
+    logger.info(f"Filtrados {len(filtrados)} produtos 3D de {len(produtos)} totais")
     return filtrados
 
 
