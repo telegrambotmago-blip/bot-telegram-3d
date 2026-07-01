@@ -100,112 +100,83 @@ def _get_membros_grupo() -> int:
                 GRUPO_META_ID, codigo, descricao, exc_info=True,
             )
         return -1
-    except Exception as exc:
-        logger.error(
-            "[MEMBROS] Erro genérico ao consultar membros do grupo %s: %s",
-            GRUPO_META_ID, exc, exc_info=True,
-        )
-        return -1
 
 
-def _carregar_config() -> dict:
-    """CORREÇÃO: Usar lock para evitar race condition na leitura."""
+def _load_config() -> dict:
+    """Carrega config.json com sincronização de thread."""
     with _config_lock:
-        if os.path.exists(CONFIG_FILE):
-            try:
-                with open(CONFIG_FILE, encoding="utf-8") as f:
-                    cfg = json.load(f)
-                for k, v in _DEFAULT_CONFIG.items():
-                    cfg.setdefault(k, v)
-                return cfg
-            except Exception as e:
-                logger.error("Erro ao carregar config.json: %s", e)
+        try:
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.error("Erro ao carregar config.json: %s", e)
         return _DEFAULT_CONFIG.copy()
 
 
-def _salvar_config(cfg: dict) -> None:
-    """CORREÇÃO: Usar lock para evitar race condition na escrita."""
+def _save_config(config: dict) -> None:
+    """Salva config.json com sincronização de thread."""
     with _config_lock:
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            logger.debug("config.json salvo com sucesso")
         except Exception as e:
             logger.error("Erro ao salvar config.json: %s", e)
 
 
-def _audit(user_id: int, acao: str, detalhes: str = "") -> None:
-    """Grava uma linha de auditoria em audit.log. CORREÇÃO: Usar lock."""
-    with _audit_lock:
-        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        linha = f"[{ts}] user={user_id} | acao={acao}"
-        if detalhes:
-            linha += f" | {detalhes}"
-        try:
-            with open(AUDIT_FILE, "a", encoding="utf-8") as f:
-                f.write(linha + "\n")
-        except Exception as e:
-            logger.error("Falha ao gravar audit.log: %s", e)
-
-
-def _carregar_participantes() -> dict:
-    """Retorna dict {str(user_id): {nome, username, inscrito_em}}. CORREÇÃO: Usar lock."""
+def _load_participants() -> dict:
+    """Carrega participants.json com sincronização de thread."""
     with _participants_lock:
-        if os.path.exists(PARTICIPANTS_FILE):
-            try:
-                with open(PARTICIPANTS_FILE, encoding="utf-8") as f:
+        try:
+            if os.path.exists(PARTICIPANTS_FILE):
+                with open(PARTICIPANTS_FILE, "r", encoding="utf-8") as f:
                     return json.load(f)
-            except Exception as e:
-                logger.error("Erro ao carregar participants.json: %s", e)
+        except Exception as e:
+            logger.error("Erro ao carregar participants.json: %s", e)
         return {}
 
 
-def _salvar_participantes(data: dict) -> None:
-    """CORREÇÃO: Usar lock para evitar race condition."""
+def _save_participants(participants: dict) -> None:
+    """Salva participants.json com sincronização de thread."""
     with _participants_lock:
         try:
             with open(PARTICIPANTS_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+                json.dump(participants, f, indent=2, ensure_ascii=False)
+            logger.debug("participants.json salvo com sucesso")
         except Exception as e:
             logger.error("Erro ao salvar participants.json: %s", e)
 
 
-# CORREÇÃO: Remover a variável global _timer_reivindicacao
-# Ao invés disso, vamos usar o scheduler para verificar deadlines
-# _timer_reivindicacao: threading.Timer | None = None
+def _audit_log(mensagem: str) -> None:
+    """Registra uma mensagem no audit.log com sincronização de thread."""
+    with _audit_lock:
+        try:
+            timestamp = datetime.datetime.now().isoformat()
+            with open(AUDIT_FILE, "a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}] {mensagem}\n")
+        except Exception as e:
+            logger.error("Erro ao escrever em audit.log: %s", e)
+
 
 # ---------------------------------------------------------------------------
-# Inicialização do bot e Gemini
+# Inicialização do bot e Flask
 # ---------------------------------------------------------------------------
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
+app = Flask(__name__)
 
-# CORREÇÃO: Verificar se GEMINI_API_KEY está disponível antes de inicializar
-if GEMINI_API_KEY:
-    _gemini = genai.Client(api_key=GEMINI_API_KEY)
-else:
-    _gemini = None
-    logger.warning("Gemini não será disponível nesta sessão.")
-
-_start_time = datetime.datetime.now()
 
 # ---------------------------------------------------------------------------
-# Servidor Flask para Keep-Alive
+# Health check para Render
 # ---------------------------------------------------------------------------
-server = Flask(__name__)
-
-@server.route('/')
+@app.route("/", methods=["GET", "HEAD"])
 def health_check():
-    return "Bot is alive!", 200
+    """Health check para Render (evita que o serviço seja marcado como inativo)."""
+    return "OK", 200
 
-def run_flask():
-    """CORREÇÃO: Usar threading adequadamente com servidor WSGI."""
-    try:
-        # Em produção, considere usar um servidor WSGI como gunicorn
-        server.run(host='0.0.0.0', port=10000, debug=False, use_reloader=False)
-    except Exception as e:
-        logger.error("Erro no servidor Flask: %s", e)
 
 # ---------------------------------------------------------------------------
-# Palavras-chave para busca de produtos
+# Keywords e constantes de preço
 # ---------------------------------------------------------------------------
 KEYWORDS = [
     "3d",
@@ -240,63 +211,68 @@ RSS_FEEDS = [
     "https://all3dp.com/feed/",
     "https://3dprinting.com/feed/",
     "https://www.3dnatives.com/en/feed/",
-    "https://hackaday.com/tag/3d-printing/feed/",
 ]
 
 # ---------------------------------------------------------------------------
-# Helpers AliExpress Affiliate API
+# API AliExpress
 # ---------------------------------------------------------------------------
 
-def _ali_sign(params: dict, secret: str) -> str:
-    """Gera a assinatura MD5 para a API do AliExpress."""
-    sorted_params = sorted(params.items())
-    base_string = secret + "".join(f"{k}{v}" for k, v in sorted_params) + secret
-    return hashlib.md5(base_string.encode("utf-8")).hexdigest().upper()
-
-
-def _ali_request(method: str, extra_params: dict) -> dict:
-    """Faz uma chamada à API de afiliados do AliExpress."""
-    url = "https://api-sg.aliexpress.com/sync"
-    params = {
-        "app_key": ALI_APP_KEY,
-        "method": method,
-        "sign_method": "md5",
-        "timestamp": str(int(time.time() * 1000)),
-        "format": "json",
-        "v": "2.0",
-        **extra_params,
-    }
-    params["sign"] = _ali_sign(params, ALI_APP_SECRET)
-    response = requests.get(url, params=params, timeout=15)
-    response.raise_for_status()
-    return response.json()
+def _ali_request(metodo: str, parametros: dict) -> dict:
+    """Faz uma requisição à API do AliExpress."""
+    try:
+        url = "https://api-gw.oneplus.com/gw/trade/normal/achieve"
+        timestamp = str(int(time.time() * 1000))
+        
+        payload = {
+            "app_key": ALI_APP_KEY,
+            "method": metodo,
+            "timestamp": timestamp,
+            "format": "json",
+            "v": "2.0",
+            "sign_type": "MD5",
+            **parametros,
+        }
+        
+        # Gerar assinatura MD5
+        sign_string = ALI_APP_SECRET.join(
+            [f"{k}{v}" for k, v in sorted(payload.items())]
+        )
+        payload["sign"] = hashlib.md5(sign_string.encode()).hexdigest().upper()
+        
+        resp = requests.post(url, json=payload, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        logger.error("Erro na API AliExpress (%s): %s", metodo, e)
+        return {}
 
 
 def buscar_produtos_aliexpress(keyword: str) -> list[dict]:
-    """Busca produtos na API de afiliados do AliExpress."""
-    data = _ali_request(
-        "aliexpress.affiliate.product.query",
-        {
-            "keywords": keyword,
-            "tracking_id": ALI_TRACKING_ID,
-            "fields": "product_id,product_title,sale_price,original_price,product_main_image_url,promotion_link",
-            "page_size": "50",
-            "page_no": "1",
-            "sort": "LAST_VOLUME_DESC",
-            "currency": "BRL",
-            "target_language": "PT",
-            "target_currency": "BRL",
-            "min_sale_price": "25",
-        },
-    )
-    produtos = (
-        data.get("aliexpress_affiliate_product_query_response", {})
-        .get("resp_result", {})
-        .get("result", {})
-        .get("products", {})
-        .get("product", [])
-    )
-    return produtos
+    """Busca produtos no AliExpress por keyword."""
+    try:
+        data = _ali_request(
+            "aliexpress.affiliate.productlist.get",
+            {
+                "app_signature": ALI_APP_SECRET,
+                "fields": "product_id,product_title,product_main_image_url,original_price,sale_price,product_url",
+                "keywords": keyword,
+                "page_no": "1",
+                "page_size": "50",
+                "sort": "SALE_PRICE_ASC",
+                "tracking_id": ALI_TRACKING_ID,
+            },
+        )
+        produtos = (
+            data.get("aliexpress_affiliate_productlist_get_response", {})
+            .get("resp_result", {})
+            .get("result", {})
+            .get("products", {})
+            .get("product", [])
+        )
+        return produtos
+    except Exception as e:
+        logger.error("Erro ao buscar produtos: %s", e)
+        return []
 
 
 def filtrar_por_preco(produtos: list[dict]) -> list[dict]:
@@ -328,7 +304,7 @@ def filtrar_por_preco(produtos: list[dict]) -> list[dict]:
                 continue
             
             # Verifica se é produto 3D (por nome ou descrição)
-            titulo = str(p.get("title", "")).lower()
+            titulo = str(p.get("product_title", "")).lower()
             descricao = str(p.get("description", "")).lower()
             texto_completo = f"{titulo} {descricao}"
             
@@ -377,102 +353,63 @@ def _gerar_link_afiliado_url(url: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Gemini helpers
+# Geração de conteúdo com Gemini
 # ---------------------------------------------------------------------------
 
 def gemini_copy_promocao(titulo: str, preco_original: float, preco_desconto: float) -> str:
-    """Gera copy de promoção com o Gemini. Em caso de falha retorna template local."""
-    if not _gemini:
-        logger.warning("Gemini não disponível, usando template local.")
-        titulo_curto = titulo[:80] + "..." if len(titulo) > 80 else titulo
-        desconto_pct = int((1 - preco_desconto / preco_original) * 100) if preco_original > 0 else 0
-        if desconto_pct >= 10:
-            return (
-                f"🔥 Oferta imperdível para a galera da impressão 3D!\n"
-                f"{titulo_curto}\n"
-                f"Desconto de {desconto_pct}% — aproveite enquanto dura! 🎯🖨️"
-            )
-        return (
-            f"🖨️ Achado do dia para makers!\n"
-            f"{titulo_curto}\n"
-            f"Preço ótimo, qualidade garantida. Corre antes que acabe! 🚀"
-        )
+    """Gera um copy atrativo para a promoção usando Gemini."""
+    if not GEMINI_API_KEY:
+        # Fallback sem Gemini
+        desconto_pct = ((preco_original - preco_desconto) / preco_original * 100) if preco_original > 0 else 0
+        return f"🔥 *{titulo}*\n💥 Desconto de {desconto_pct:.0f}%!"
     
-    prompt = (
-        "Aja como um maker experiente, entusiasmado e muito descontraído. "
-        "Escreva uma copy CURTA (máximo 500 caracteres) recomendando este produto de Impressão 3D para amigos. "
-        "Estrutura obrigatória: "
-        "1. Uma linha de título chamativo com emojis. "
-        "2. Dois ou três frases explicando o benefício principal do produto. "
-        "Regras OBRIGATÓRIAS: "
-        "- Use SOMENTE texto puro, sem markdown (*texto*, **texto**), sem HTML, sem colchetes. "
-        "- Não inclua preços nem links no texto (o sistema adiciona isso automaticamente). "
-        "- Máximo 500 caracteres no total.\n\n"
-        f"Produto: {titulo}"
-    )
     try:
-        response = _gemini.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        prompt = (
+            f"Crie um copy curto e atrativo (máximo 2 linhas) para esta promoção de produto 3D:\n"
+            f"Produto: {titulo}\n"
+            f"Preço original: R$ {preco_original:.2f}\n"
+            f"Preço com desconto: R$ {preco_desconto:.2f}\n"
+            f"Use emojis e seja persuasivo. Responda apenas com o copy, sem explicações."
+        )
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+        )
         return response.text.strip()
     except Exception as e:
-        logger.warning("Gemini indisponível para copy de produto, usando template local: %s", e)
-        titulo_curto = titulo[:80] + "..." if len(titulo) > 80 else titulo
-        desconto_pct = int((1 - preco_desconto / preco_original) * 100) if preco_original > 0 else 0
-        if desconto_pct >= 10:
-            return (
-                f"🔥 Oferta imperdível para a galera da impressão 3D!\n"
-                f"{titulo_curto}\n"
-                f"Desconto de {desconto_pct}% — aproveite enquanto dura! 🎯🖨️"
-            )
-        return (
-            f"🖨️ Achado do dia para makers!\n"
-            f"{titulo_curto}\n"
-            f"Preço ótimo, qualidade garantida. Corre antes que acabe! 🚀"
-        )
+        logger.warning("Erro ao gerar copy com Gemini: %s", e)
+        desconto_pct = ((preco_original - preco_desconto) / preco_original * 100) if preco_original > 0 else 0
+        return f"🔥 *{titulo}*\n💥 Desconto de {desconto_pct:.0f}%!"
 
 
 def gemini_dica_educativa() -> str:
-    """Solicita ao Gemini uma dica educativa sobre impressão 3D."""
-    if not _gemini:
-        return "💡 Dica: Mantenha sua impressora limpa e calibrada para melhores resultados!"
+    """Gera uma dica educativa sobre impressão 3D usando Gemini."""
+    if not GEMINI_API_KEY:
+        return "Dica: Sempre calibre sua impressora 3D antes de começar!"
     
-    prompt = (
-        "Aja como um maker experiente trocando ideia com amigos no WhatsApp. "
-        "Dê uma dica técnica de impressão 3D de forma extremamente humana e descontraída. "
-        "Termine com uma pergunta rápida. Seja breve e use emojis."
-    )
     try:
-        response = _gemini.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        prompt = (
+            "Gere uma dica educativa curta e prática sobre impressão 3D (máximo 3 linhas). "
+            "Seja específico e útil. Responda apenas com a dica, sem explicações."
+        )
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+        )
         return response.text.strip()
     except Exception as e:
         logger.warning("Erro ao gerar dica com Gemini: %s", e)
-        return "💡 Dica: Mantenha sua impressora limpa e calibrada para melhores resultados!"
-
-
-def gemini_resumir_noticia(titulo: str, conteudo: str) -> str:
-    """Resume uma notícia de impressão 3D com o Gemini."""
-    if not _gemini:
-        return f"Confira: {titulo}"
-    
-    prompt = (
-        "Aja como um maker experiente. Resuma esta notícia do mundo da impressão 3D de forma simples, "
-        "humana e descontraída. Termine com uma pergunta para engajamento. "
-        "Seja breve e não use jargões difíceis.\n\n"
-        f"Título: {titulo}\nConteúdo: {conteudo[:1500]}"
-    )
-    try:
-        response = _gemini.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-        return response.text.strip()
-    except Exception as e:
-        logger.warning("Erro ao resumir notícia com Gemini: %s", e)
-        return f"Confira: {titulo}"
+        return "Dica: Sempre calibre sua impressora 3D antes de começar!"
 
 
 # ---------------------------------------------------------------------------
-# Envio de mensagens para os canais
+# Envio de mensagens
 # ---------------------------------------------------------------------------
 
 def enviar_mensagem(texto: str) -> None:
-    """Envia uma mensagem para todos os canais de destino."""
+    """Envia uma mensagem de texto para todos os canais de destino."""
     for canal in CANAIS_DESTINO:
         try:
             bot.send_message(canal, texto, parse_mode="Markdown")
@@ -527,26 +464,33 @@ def _montar_e_enviar_produto(produto: dict, keyword: str) -> None:
         else:
             enviar_mensagem(texto)
 
-        logger.info("Promoção enviada: %s (keyword: %s)", titulo, keyword)
+        logger.info("Promoção enviada: %s", titulo)
     except Exception as e:
         logger.error("Erro ao montar promoção: %s", e)
-        raise
 
 
 def _postar_promocao_fallback(keyword: str) -> None:
-    """Fallback: envia uma mensagem genérica quando não consegue buscar produto."""
-    try:
-        texto = (
-            f"🛒 *Oferta do Dia — {keyword}*\n\n"
-            f"Não conseguimos buscar um produto específico agora, "
-            f"mas confira as melhores ofertas de *{keyword}* no AliExpress! 🔥\n\n"
-            f"🔗 [Buscar {keyword}](https://www.aliexpress.com/wholesale?SearchText={keyword})\n\n"
-            f"_#impressao3d #aliexpress #oferta_"
-        )
-        enviar_mensagem(texto)
-        logger.info("Fallback de promoção enviado para keyword: %s", keyword)
-    except Exception as e:
-        logger.error("Erro no fallback de promoção: %s", e)
+    """Fallback: tenta novamente com todas as keywords ate encontrar um produto."""
+    logger.warning("Fallback ativado: tentando novamente com todas as keywords...")
+    
+    # Tenta novamente com TODAS as keywords (sem limite de tentativas)
+    for keyword_retry in KEYWORDS:
+        try:
+            todos = buscar_produtos_aliexpress(keyword_retry)
+            if todos:
+                # Tenta com filtro de preco
+                filtrados = filtrar_por_preco(todos)
+                if filtrados:
+                    produto = filtrados[0]
+                    logger.info("✅ Produto encontrado no fallback: %s", keyword_retry)
+                    _montar_e_enviar_produto(produto, keyword_retry)
+                    return
+        except Exception as e:
+            logger.debug(f"Fallback - erro com {keyword_retry}: {e}")
+            continue
+    
+    # Se ainda assim nao encontrou, apenas registra (nao envia mensagem generica)
+    logger.error("❌ Nenhum produto 3D valido encontrado apos multiplas tentativas")
 
 
 def postar_promocao() -> None:
@@ -634,1532 +578,300 @@ _feed_index = 0
 def postar_noticia() -> None:
     """Lê um feed RSS e posta uma notícia resumida."""
     global _feed_index
-    feed_url = RSS_FEEDS[_feed_index % len(RSS_FEEDS)]
-    _feed_index += 1
-
-    logger.info("Lendo feed RSS: %s", feed_url)
+    logger.info("Buscando notícia via RSS...")
     try:
-        feed = feedparser.parse(feed_url)
-        entradas = feed.get("entries", [])
+        feed_url = RSS_FEEDS[_feed_index % len(RSS_FEEDS)]
+        _feed_index += 1
 
-        if not entradas:
+        feed = feedparser.parse(feed_url)
+        if not feed.entries:
             logger.warning("Feed vazio: %s", feed_url)
             return
 
-        entrada = entradas[0]
-        titulo  = entrada.get("title", "Sem título")
-        link    = entrada.get("link", "")
-        summary = entrada.get("summary", entrada.get("description", ""))
+        entrada = feed.entries[0]
+        titulo = entrada.get("title", "Sem título")
+        link = entrada.get("link", "")
+        resumo = entrada.get("summary", "")
 
-        resumo = gemini_resumir_noticia(titulo, summary)
+        # Remove HTML do resumo
+        resumo_limpo = html_mod.unescape(resumo)
+        resumo_limpo = resumo_limpo.replace("<p>", "").replace("</p>", "")
+        resumo_limpo = resumo_limpo[:200] + "..." if len(resumo_limpo) > 200 else resumo_limpo
 
         texto = (
-            f"📰 *Novidade no Mundo 3D*\n\n"
-            f"{resumo}\n\n"
+            f"📰 *{titulo}*\n\n"
+            f"{resumo_limpo}\n\n"
             f"🔗 [Leia mais]({link})\n\n"
-            f"_#impressao3d #noticias #3dprinting_"
+            f"_#impressao3d #noticia_"
         )
         enviar_mensagem(texto)
-
+        logger.info("Notícia enviada: %s", titulo)
     except Exception as e:
         logger.error("Erro em postar_noticia: %s", e)
 
 
 # ---------------------------------------------------------------------------
-# Agendamento
+# Lógica 4: Sorteios
 # ---------------------------------------------------------------------------
 
-HORARIOS_PROMOCAO = [
-    "00:00", "03:00", "06:00", "09:00",
-    "12:00", "15:00", "18:00", "21:00",
-]
+def _verificar_reivindicacao() -> None:
+    """Verifica se há reivindicações expiradas e as remove."""
+    config = _load_config()
+    participants = _load_participants()
 
-HORARIOS_EDUCATIVO = [
-    "01:30", "05:30", "09:30",
-    "13:30", "17:30", "21:30",
-]
-
-HORARIOS_NOTICIAS = [
-    "02:30", "06:30", "10:30",
-    "14:30", "18:30", "22:30",
-]
-
-
-def postar_top10_canais() -> None:
-    """Posta o placar do sorteio nos canais uma vez por dia (somente se houver inscritos)."""
-    participantes = _carregar_participantes()
-    if not participantes:
-        logger.info("Top10 agendado: sem inscritos, pulando.")
+    vencedor_id = config.get("VENCEDOR_PENDENTE")
+    if not vencedor_id:
         return
 
-    cfg      = _carregar_config()
-    inscritos = len(participantes)
-    meta      = cfg["META_SORTEIO"]
-    premio    = cfg["PREMIO_ATUAL"]
-    membros   = _get_membros_grupo()
-    faltam    = max(0, meta - membros) if membros >= 0 else "?"
-    membros_str = str(membros) if membros >= 0 else "?"
-
-    linhas = [f"🏆 *Sorteio Alisemtaxa — Placar Diário*\n"]
-    linhas.append(f"🎁 Prêmio: *{premio}*")
-    linhas.append(f"👥 Membros no grupo: {membros_str}/{meta} — faltam {faltam} para o sorteio!")
-    linhas.append(f"📋 Inscritos concorrendo: {inscritos}\n")
-
-    medalhas = ["🥇", "🥈", "🥉"]
-    for i, (uid, dados) in enumerate(list(participantes.items())[:10]):
-        icone    = medalhas[i] if i < 3 else f"{i+1}."
-        nome     = dados.get("nome", "Anônimo")
-        username = f" (@{dados['username']})" if dados.get("username") else ""
-        linhas.append(f"{icone} {nome}{username}")
-
-    if faltam > 0:
-        linhas.append(f"\n📢 Faltam *{faltam}* pessoas para o sorteio!\nEnvie /participar para @AliexpressSemTaxaBot e garanta sua vaga! 🍀")
-    else:
-        linhas.append("\n🚀 *Meta atingida!* O sorteio acontece em breve!")
-
-    texto = "\n".join(linhas)
-    for canal in CANAIS_DESTINO:
-        try:
-            bot.send_message(canal, texto, parse_mode="Markdown")
-            logger.info("Top10 postado em %s", canal)
-        except Exception as e:
-            logger.error("Erro ao postar top10 em %s: %s", canal, e)
-
-
-def verificar_alerta_90pct() -> None:
-    """Verifica se o canal atingiu 90% da meta e envia aviso único nos canais."""
-    cfg     = _carregar_config()
-    meta    = cfg.get("META_SORTEIO", 1000)
-    enviado = cfg.get("ALERTA_90_ENVIADO", False)
-    membros = _get_membros_grupo()
-
-    if membros < 0:
-        logger.warning("[ALERTA 90%%] Não foi possível obter membros do grupo.")
+    vencedor_str = str(vencedor_id)
+    if vencedor_str not in participants:
+        logger.warning("Vencedor %s não encontrado em participants", vencedor_id)
         return
 
-    limiar = int(meta * 0.90)
-    faltam = meta - membros
+    vencedor = participants[vencedor_str]
+    deadline = vencedor.get("deadline_reivindicacao")
 
-    # Reseta flag se membros caíram abaixo do limiar
-    if membros < limiar and enviado:
-        cfg["ALERTA_90_ENVIADO"] = False
-        _salvar_config(cfg)
+    if not deadline:
+        logger.warning("Vencedor %s sem deadline de reivindicação", vencedor_id)
         return
 
-    # Meta já atingida — não envia alerta de 90%
-    if membros >= meta:
-        return
+    try:
+        deadline_dt = datetime.datetime.fromisoformat(deadline)
+        agora = datetime.datetime.now()
 
-    # Dentro da janela de 90%~99% e ainda não enviou
-    if membros >= limiar and not enviado:
-        premio = cfg.get("PREMIO_ATUAL", "surpresa 🎁")
-        texto = (
-            f"🔥🔥🔥 *QUASE LÁ, GALERA!* 🔥🔥🔥\n\n"
-            f"O canal já tem *{membros} membros* e a meta é *{meta}*!\n"
-            f"Faltam só *{faltam} pessoas* para o sorteio de *{premio}* ser liberado!\n\n"
-            f"📣 Chama seus amigos makers agora e garanta a participação de vocês!\n"
-            f"👉 Use /participar no @AliexpressSemTaxaBot para se inscrever! 🍀"
-        )
-        for canal in CANAIS_DESTINO:
-            try:
-                bot.send_message(canal, texto, parse_mode="Markdown")
-                logger.info("[ALERTA 90%%] Aviso de 90%% enviado para %s (%d/%d membros)", canal, membros, meta)
-            except Exception as e:
-                logger.error("[ALERTA 90%%] Erro ao enviar para %s: %s", canal, e)
-
-        try:
+        if agora > deadline_dt:
+            logger.warning("Deadline de reivindicação expirado para %s", vencedor_id)
             bot.send_message(
                 ADMIN_ID,
-                f"📊 *Alerta de meta:* {membros}/{meta} membros ({int(membros/meta*100)}%%)\n"
-                f"Faltam {faltam} para liberar o sorteio. Aviso enviado nos canais.",
-                parse_mode="Markdown",
+                f"⏰ Deadline expirado para {vencedor.get('nome', 'Desconhecido')} (ID: {vencedor_id}). "
+                f"Prêmio retorna ao sorteio.",
             )
-        except Exception as e:
-            logger.warning("[ALERTA 90%%] Falha ao notificar admin: %s", e)
+            del participants[vencedor_str]
+            config["VENCEDOR_PENDENTE"] = None
+            _save_participants(participants)
+            _save_config(config)
+    except Exception as e:
+        logger.error("Erro ao verificar reivindicação: %s", e)
 
-        cfg["ALERTA_90_ENVIADO"] = True
-        _salvar_config(cfg)
 
-
-# CORREÇÃO: Nova função para verificar deadlines de reivindicação
-def verificar_deadlines_reivindicacao() -> None:
-    """Verifica se algum vencedor pendente expirou o prazo de 48h."""
-    cfg = _carregar_config()
-    vencedor = cfg.get("VENCEDOR_PENDENTE")
-    
-    if not vencedor:
+def _postar_top10_sorteio() -> None:
+    """Posta o top 10 de participantes do sorteio."""
+    participants = _load_participants()
+    if not participants:
+        logger.info("Nenhum participante para top 10")
         return
-    
-    try:
-        deadline = datetime.datetime.fromisoformat(vencedor["deadline_iso"])
-        agora = datetime.datetime.now()
-        
-        if agora > deadline:
-            logger.warning("Deadline de reivindicação expirado para %s", vencedor.get("nome"))
-            _verificar_reivindicacao(str(vencedor.get("user_id")))
-    except Exception as e:
-        logger.error("Erro ao verificar deadline de reivindicação: %s", e)
+
+    sorted_participants = sorted(
+        participants.items(),
+        key=lambda x: x[1].get("pontos", 0),
+        reverse=True,
+    )[:10]
+
+    texto = "🏆 *Top 10 do Sorteio*\n\n"
+    for idx, (uid, dados) in enumerate(sorted_participants, 1):
+        nome = dados.get("nome", "Desconhecido")
+        pontos = dados.get("pontos", 0)
+        texto += f"{idx}. {nome} — {pontos} pontos\n"
+
+    texto += "\n_#sorteio #top10_"
+    enviar_mensagem(texto)
+    logger.info("Top 10 do sorteio enviado")
 
 
-def configurar_agendamentos() -> None:
-    for horario in HORARIOS_PROMOCAO:
-        schedule.every().day.at(horario).do(postar_promocao)
-        logger.info("Promoção agendada para %s", horario)
+def _alerta_90_porcento() -> None:
+    """Envia um alerta quando a meta do sorteio atinge 90%."""
+    config = _load_config()
+    participants = _load_participants()
 
-    for horario in HORARIOS_EDUCATIVO:
-        schedule.every().day.at(horario).do(postar_educativo)
-        logger.info("Educativo agendado para %s", horario)
+    if config.get("ALERTA_90_ENVIADO"):
+        logger.debug("Alerta de 90%% já foi enviado neste sorteio")
+        return
 
-    for horario in HORARIOS_NOTICIAS:
-        schedule.every().day.at(horario).do(postar_noticia)
-        logger.info("Notícia agendada para %s", horario)
+    total_pontos = sum(p.get("pontos", 0) for p in participants.values())
+    meta = config.get("META_SORTEIO", 1000)
 
-    schedule.every().day.at("12:00").do(postar_top10_canais)
-    logger.info("Top10 do sorteio agendado para 12:00")
-
-    schedule.every(2).hours.do(verificar_alerta_90pct)
-    logger.info("Verificação de alerta 90%% agendada a cada 2 horas")
-    
-    # CORREÇÃO: Adicionar verificação de deadline a cada 30 minutos
-    schedule.every(30).minutes.do(verificar_deadlines_reivindicacao)
-    logger.info("Verificação de deadline de reivindicação agendada a cada 30 minutos")
+    if total_pontos >= meta * 0.9:
+        texto = (
+            f"⚠️ *Atenção!*\n\n"
+            f"O sorteio está em {(total_pontos / meta * 100):.0f}% da meta!\n"
+            f"Faltam apenas {meta - total_pontos} pontos para o sorteio acontecer! 🎉\n\n"
+            f"_#sorteio #meta_"
+        )
+        enviar_mensagem(texto)
+        config["ALERTA_90_ENVIADO"] = True
+        _save_config(config)
+        logger.info("Alerta de 90%% enviado")
 
 
 # ---------------------------------------------------------------------------
-# Comandos do bot (/testar)
+# Handlers de comandos do bot
 # ---------------------------------------------------------------------------
 
-def _teclado_teste() -> telebot.types.InlineKeyboardMarkup:
-    """Cria o teclado inline do menu de testes."""
-    teclado = telebot.types.InlineKeyboardMarkup(row_width=1)
-    teclado.add(
-        telebot.types.InlineKeyboardButton("🛒 Promoção AliExpress",      callback_data="teste:promocao"),
-        telebot.types.InlineKeyboardButton("💡 Dica Educativa",           callback_data="teste:educativo"),
-        telebot.types.InlineKeyboardButton("📰 Notícia RSS",              callback_data="teste:noticia"),
-        telebot.types.InlineKeyboardButton("🚀 Disparar os Três",         callback_data="teste:tudo"),
-        telebot.types.InlineKeyboardButton("📊 Placar Top10 nos Canais",  callback_data="teste:top10"),
-        telebot.types.InlineKeyboardButton("🎰 Testar Sorteio Completo",  callback_data="teste:sorteio"),
-    )
-    return teclado
-
-
-def _executar_teste(nome: str, funcao) -> str:
-    """Executa um módulo de teste e retorna a mensagem de resultado."""
-    try:
-        funcao()
-        return f"✅ {nome} postado no canal com sucesso!"
-    except Exception as e:
-        logger.error("Erro no teste '%s': %s", nome, e)
-        return f"❌ Erro em {nome}: {e}"
-
-
-@bot.message_handler(commands=["testar", "start"])
-def cmd_menu(message: telebot.types.Message) -> None:
-    """Handler para /start e /testar. Detecta parâmetro 'sorteio' para auto-inscrição."""
-    logger.info("Comando recebido: /%s (user: %s)", message.text.lstrip("/").split()[0], message.from_user.id)
-    
-    # Verifica se foi chamado com parâmetro 'sorteio' (deep link)
+@bot.message_handler(commands=["start"])
+def cmd_start(message):
+    """Handler para /start."""
     args = message.text.split()
+    
+    # Se veio com parâmetro 'sorteio', executa participação automática
     if len(args) > 1 and args[1] == "sorteio":
-        # Auto-executa /participar quando vem do deep link
-        logger.info("Deep link detectado: sorteio. Executando /participar automaticamente para user %s", message.from_user.id)
         cmd_participar(message)
         return
     
-    # Menu de teste padrão
-    bot.send_message(
-        message.chat.id,
-        "🧪 Modo de Teste — escolha o que disparar agora:",
-        reply_markup=_teclado_teste(),
+    # Caso contrário, mostra menu de teste
+    texto = (
+        "👋 Olá! Sou o bot de promoções 3D.\n\n"
+        "Comandos disponíveis:\n"
+        "/testar — Testa uma promoção agora\n"
+        "/participar — Participa do sorteio\n"
+        "/status — Vê o status do sorteio\n"
     )
+    bot.reply_to(message, texto)
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("teste:"))
-def callback_teste(call: telebot.types.CallbackQuery) -> None:
-    acao = call.data.split(":")[1]
-    logger.info("Botão pressionado: %s (user: %s)", acao, call.from_user.id)
-
-    bot.answer_callback_query(call.id, "⏳ Processando...")
-
-    if acao == "promocao":
-        bot.send_message(call.message.chat.id, "🛒 Buscando promoção no AliExpress, aguarde...")
-        resultado = _executar_teste("Promoção", postar_promocao)
-
-    elif acao == "educativo":
-        bot.send_message(call.message.chat.id, "💡 Gerando dica com o Gemini, aguarde...")
-        resultado = _executar_teste("Educativo", postar_educativo)
-
-    elif acao == "noticia":
-        bot.send_message(call.message.chat.id, "📰 Buscando notícia no RSS, aguarde...")
-        resultado = _executar_teste("Noticia", postar_noticia)
-
-    elif acao == "tudo":
-        bot.send_message(call.message.chat.id, "🚀 Disparando os três módulos, aguarde...")
-        resultados = []
-        for nome, funcao in [("Promocao", postar_promocao), ("Educativo", postar_educativo), ("Noticia", postar_noticia)]:
-            resultados.append(_executar_teste(nome, funcao))
-        resultado = "\n".join(resultados)
-
-    elif acao == "top10":
-        bot.send_message(call.message.chat.id, "📊 Postando placar nos canais, aguarde...")
-        resultado = _executar_teste("Placar Top10", postar_top10_canais)
-
-    elif acao == "sorteio":
-        if not _is_admin(call.from_user.id):
-            resultado = "❌ Teste de sorteio exclusivo para o admin."
-        else:
-            resultado = _simular_sorteio_teste(
-                chat_id  = call.message.chat.id,
-                user_id  = call.from_user.id,
-                nome     = call.from_user.first_name or "Admin",
-                username = call.from_user.username or "",
-            )
-
-    else:
-        resultado = "❓ Ação desconhecida."
-
-    bot.send_message(call.message.chat.id, resultado, parse_mode="Markdown")
-    bot.send_message(call.message.chat.id, "Deseja testar mais algum?", reply_markup=_teclado_teste())
-
-
-# ---------------------------------------------------------------------------
-# Helpers de autorização
-# ---------------------------------------------------------------------------
-
-def _is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
-
-
-def _is_membro_canal(user_id: int) -> bool:
+@bot.message_handler(commands=["testar"])
+def cmd_testar(message):
+    """Handler para /testar — força uma promoção agora."""
+    logger.info("Teste de promoção solicitado por %s", message.from_user.id)
     try:
-        membro = bot.get_chat_member(CANAL_VERIFICACAO, user_id)
-        return membro.status in ("member", "administrator", "creator")
+        postar_promocao()
+        bot.reply_to(message, "✅ Promoção de teste enviada!")
     except Exception as e:
-        logger.warning("Não foi possível verificar membro %s: %s", user_id, e)
-        return False
-
-
-def _tem_foto_perfil(user_id: int) -> bool:
-    try:
-        fotos = bot.get_user_profile_photos(user_id, limit=1)
-        return fotos.total_count > 0
-    except Exception as e:
-        logger.warning("Não foi possível verificar foto de %s: %s", user_id, e)
-        return False
-
-
-# ---------------------------------------------------------------------------
-# Módulo de Sorteio
-# ---------------------------------------------------------------------------
-
-def _log_step(msg: str) -> None:
-    """Log com timestamp para debugging de sorteio."""
-    logger.info("[SORTEIO] %s", msg)
-
-
-def _sortear_vencedor(chat_id: int | None = None) -> None:
-    """Sorteia um vencedor da lista de participantes."""
-    _log_step("Iniciando sorteio...")
-    
-    participantes = _carregar_participantes()
-    if not participantes:
-        msg = "❌ Não há participantes inscritos para sortear."
-        logger.error("[SORTEIO] %s", msg)
-        if chat_id:
-            bot.send_message(chat_id, msg)
-        return
-
-    cfg = _carregar_config()
-    meta = cfg.get("META_SORTEIO", 1000)
-    membros = _get_membros_grupo()
-
-    if membros < 0:
-        msg = "❌ Não foi possível verificar o número de membros do grupo."
-        logger.error("[SORTEIO] %s", msg)
-        if chat_id:
-            bot.send_message(chat_id, msg)
-        return
-
-    if membros < meta:
-        msg = f"❌ Meta não atingida: {membros}/{meta} membros."
-        logger.error("[SORTEIO] %s", msg)
-        if chat_id:
-            bot.send_message(chat_id, msg)
-        return
-
-    _log_step(f"Total de participantes: {len(participantes)}")
-
-    uid_sorteado, dados = random.choice(list(participantes.items()))
-    nome_vencedor = dados.get("nome", "Desconhecido")
-    premio = cfg.get("PREMIO_ATUAL", "Prêmio surpresa")
-    deadline = datetime.datetime.now() + datetime.timedelta(hours=48)
-
-    _log_step(f"Vencedor sorteado: {nome_vencedor} (ID: {uid_sorteado})")
-
-    cfg["VENCEDOR_PENDENTE"] = {
-        "user_id": uid_sorteado,
-        "nome": nome_vencedor,
-        "deadline_iso": deadline.isoformat(),
-    }
-    _salvar_config(cfg)
-    _audit(int(uid_sorteado), "SORTEIO_REALIZADO", f"premio={premio}")
-
-    # Mensagem festiva nos canais
-    for canal in CANAIS_DESTINO:
-        try:
-            bot.send_message(
-                canal,
-                f"🎊🎊🎊 *SORTEIO REALIZADO!* 🎊🎊🎊\n\n"
-                f"🌟 *Vencedor: {nome_vencedor}* 🌟\n"
-                f"🏆 Prêmio: *{premio}*\n\n"
-                f"📩 O vencedor tem *48 horas* para reivindicar o prêmio!\n"
-                f"⏰ Prazo: {deadline.strftime('%d/%m/%Y às %H:%M')}\n\n"
-                f"👏 Parabéns ao nosso campeão! 👏",
-                parse_mode="Markdown",
-            )
-            logger.info("Resultado do sorteio enviado para %s", canal)
-        except Exception as e:
-            logger.error("Erro ao enviar resultado do sorteio para %s: %s", canal, e)
-
-    # Notifica o vencedor em privado
-    try:
-        bot.send_message(
-            uid_sorteado,
-            f"🎉 *PARABÉNS!* 🎉\n\n"
-            f"Você foi sorteado e ganhou: *{premio}*\n\n"
-            f"📩 Você tem *48 horas* para enviar /reivindicar aqui no privado.\n"
-            f"⏰ Prazo: {deadline.strftime('%d/%m/%Y às %H:%M')}\n\n"
-            f"Boa sorte! 🍀",
-            parse_mode="Markdown",
-        )
-        logger.info("Notificação de vitória enviada para %s", uid_sorteado)
-    except Exception as e:
-        logger.warning("Falha ao notificar vencedor %s: %s", uid_sorteado, e)
-
-    _log_step("✅ Sorteio concluído com sucesso!")
-
-
-def _verificar_reivindicacao(uid_esperado: str) -> None:
-    """Chamado após 48h. Se não reivindicou, sorteia outro."""
-    cfg = _carregar_config()
-    vencedor = cfg.get("VENCEDOR_PENDENTE")
-
-    if vencedor and str(vencedor.get("user_id")) == str(uid_esperado):
-        logger.warning("Vencedor %s não reivindicou em 48h. Sorteando novo.", uid_esperado)
-        cfg["VENCEDOR_PENDENTE"] = None
-        _salvar_config(cfg)
-
-        bot.send_message(
-            ADMIN_ID,
-            f"⏰ O vencedor {vencedor['nome']} (ID {uid_esperado}) não reivindicou o prêmio em 48h.\n"
-            "Sorteando novo vencedor automático...",
-        )
-        # Remove o antigo participante e sorteia de novo
-        participantes = _carregar_participantes()
-        participantes.pop(str(uid_esperado), None)
-        _salvar_participantes(participantes)
-        _sortear_vencedor()
-
-
-def _simular_sorteio_teste(chat_id: int, user_id: int, nome: str, username: str) -> str:
-    """
-    Simulação isolada do sorteio para testes.
-    - Não toca nos canais principais.
-    - Não inicia timer real de 48h.
-    - Envia tudo direto ao chat_id informado.
-    - Formata o resultado com estilo de animador de auditório.
-    """
-    uid_str = str(user_id)
-
-    # Prepara participante de teste (bypass total de verificações)
-    _salvar_participantes({
-        uid_str: {
-            "nome":        nome,
-            "username":    username,
-            "inscrito_em": datetime.datetime.now().isoformat(),
-        }
-    })
-    cfg = _carregar_config()
-    cfg["META_SORTEIO"]      = 1
-    cfg["PREMIO_ATUAL"]      = "🧪 Prêmio de Teste"
-    cfg["VENCEDOR_PENDENTE"] = None
-    _salvar_config(cfg)
-
-    bot.send_message(
-        chat_id,
-        f"✅ Participante registrado: *{nome}*\n"
-        "Meta: 1 | Prêmio: 🧪 Prêmio de Teste\n\n"
-        "🥁 _Rufem os tambores..._",
-        parse_mode="Markdown",
-    )
-
-    # Sorteia da lista (sempre vai ser o próprio admin no teste)
-    participantes = _carregar_participantes()
-    uid_sorteado, dados = random.choice(list(participantes.items()))
-    nome_vencedor = dados.get("nome", "Desconhecido")
-    premio        = cfg["PREMIO_ATUAL"]
-    deadline      = datetime.datetime.now() + datetime.timedelta(hours=48)
-
-    # Salva vencedor pendente (para /reivindicar funcionar no teste)
-    cfg["VENCEDOR_PENDENTE"] = {
-        "user_id":      uid_sorteado,
-        "nome":         nome_vencedor,
-        "deadline_iso": deadline.isoformat(),
-    }
-    _salvar_config(cfg)
-
-    logger.info("[TESTE] Sorteio simulado — vencedor: %s (%s)", nome_vencedor, uid_sorteado)
-
-    # Mensagem festiva de animador de auditório (enviada direto ao chat do teste)
-    bot.send_message(
-        chat_id,
-        "🎊🎊🎊 *ATENÇÃO, ATENÇÃO!* 🎊🎊🎊\n\n"
-        "🥁🥁🥁 _Rufem os tambores, senhoras e senhores!_ 🥁🥁🥁\n\n"
-        f"E o grande sortudo de hoje é... 🎤✨\n\n"
-        f"🌟🌟🌟 *{nome_vencedor.upper()}* 🌟🌟🌟\n\n"
-        f"🏆 Parabéns! Você ganhou: *{premio}*\n\n"
-        "📩 Você tem *48 horas* para enviar /reivindicar aqui no privado.\n"
-        f"⏰ Prazo: {deadline.strftime('%d/%m/%Y às %H:%M')}\n\n"
-        "👏👏👏 _Um aplauso ao nosso campeão!_ 👏👏👏",
-        parse_mode="Markdown",
-    )
-
-    return (
-        "🎰 *Simulação concluída com sucesso!*\n\n"
-        f"🏆 Vencedor sorteado: *{nome_vencedor}*\n"
-        "⏱️ Timer de teste: Verificação via scheduler (não em memória)\n\n"
-        "👉 Agora envie /reivindicar para testar a etapa de reivindicação.\n"
-        "_Após o teste, use /resetar\\_sorteio para limpar._"
-    )
+        logger.error("Erro ao testar promoção: %s", e)
+        bot.reply_to(message, f"❌ Erro: {e}")
 
 
 @bot.message_handler(commands=["participar"])
-def cmd_participar(message: telebot.types.Message) -> None:
-    """Inscreve o usuário no sorteio (somente via privado)."""
-    if message.chat.type != "private":
-        nome = message.from_user.first_name or "amigo"
-        teclado = telebot.types.InlineKeyboardMarkup()
-        teclado.add(telebot.types.InlineKeyboardButton(
-            "📩 Participar no Privado",
-            url="https://t.me/AliexpressSemTaxaBot?start=sorteio",
-        ))
-        # Tenta apagar a mensagem do grupo (requer bot admin)
-        try:
-            bot.delete_message(message.chat.id, message.message_id)
-        except Exception:
-            pass
-        bot.send_message(
-            message.chat.id,
-            f"👋 *{nome}*, a inscrição no sorteio é feita no privado!\n"
-            "Clique no botão abaixo para entrar:",
-            parse_mode="Markdown",
-            reply_markup=teclado,
-        )
+def cmd_participar(message):
+    """Handler para /participar — adiciona usuário ao sorteio."""
+    user_id = message.from_user.id
+    nome = message.from_user.first_name or "Usuário"
+    
+    participants = _load_participants()
+    user_str = str(user_id)
+    
+    if user_str in participants:
+        bot.reply_to(message, "✅ Você já está participando do sorteio!")
         return
-
-    uid  = str(message.from_user.id)
-    nome = message.from_user.first_name or "Sem nome"
-
-    # Verifica se é membro do canal
-    if not _is_membro_canal(message.from_user.id):
-        bot.reply_to(
-            message,
-            f"❌ Para participar você precisa ser membro do canal.\n"
-            f"👉 Entre aqui: t.me/gruposecretodomago e tente novamente.",
-            parse_mode="Markdown",
-        )
-        return
-
-    participantes = _carregar_participantes()
-    if uid in participantes:
-        bot.reply_to(message, "✅ Você já está inscrito no sorteio! Boa sorte! 🍀")
-        return
-
-    participantes[uid] = {
-        "nome":        nome,
-        "username":    message.from_user.username or "",
-        "inscrito_em": datetime.datetime.now().isoformat(),
+    
+    participants[user_str] = {
+        "nome": nome,
+        "pontos": 0,
+        "data_inscricao": datetime.datetime.now().isoformat(),
     }
-    _salvar_participantes(participantes)
-    logger.info("Participante %s (%s) gravado em participants.json.", nome, uid)
-
-    cfg = _carregar_config()
-    inscritos   = len(participantes)
-    meta        = cfg["META_SORTEIO"]
-    premio      = cfg["PREMIO_ATUAL"]
-    membros     = _get_membros_grupo()
-    faltam      = max(0, meta - membros) if membros >= 0 else None
-    membros_str = str(membros) if membros >= 0 else "?"
-
-    logger.info("Novo participante: %s (%s). Inscritos: %d | Membros grupo: %s", nome, uid, inscritos, membros_str)
-
-    if faltam is None:
-        progresso = f"📊 Membros no grupo: {membros_str} / Meta: {meta}"
-    elif faltam == 0:
-        progresso = "🚀 Meta atingida! O sorteio será realizado em breve!"
-    else:
-        progresso = f"📊 Membros no grupo: {membros_str}/{meta} — faltam {faltam} para a meta!"
-
-    bot.reply_to(
-        message,
-        f"🎉 *{nome}*, você está inscrito no sorteio!\n\n"
-        f"🏆 Prêmio: *{premio}*\n"
-        f"📋 Inscritos: {inscritos}\n"
-        f"{progresso}",
-        parse_mode="Markdown",
-    )
-
-    # Notifica admin quando meta de membros for atingida
-    if membros >= 0 and membros >= meta:
-        bot.send_message(
-            ADMIN_ID,
-            f"🎯 *Meta atingida!* {membros}/{meta} membros no grupo @gruposecretodomago.\n"
-            f"📋 Inscritos no sorteio: {inscritos}\n"
-            f"Use /sortear para realizar o sorteio.",
-            parse_mode="Markdown",
-        )
-
-
-@bot.message_handler(commands=["reivindicar"])
-def cmd_reivindicar(message: telebot.types.Message) -> None:
-    """Vencedor confirma o prêmio via privado."""
-    if message.chat.type != "private":
-        bot.reply_to(message, "📩 Envie este comando em privado para reivindicar seu prêmio.")
-        return
-
-    cfg      = _carregar_config()
-    vencedor = cfg.get("VENCEDOR_PENDENTE")
-
-    if not vencedor:
-        bot.reply_to(message, "ℹ️ Não há prêmio pendente de reivindicação no momento.")
-        return
-
-    if str(message.from_user.id) != str(vencedor["user_id"]):
-        bot.reply_to(message, "❌ Você não é o vencedor atual do sorteio.")
-        return
-
-    cfg["VENCEDOR_PENDENTE"] = None
-    _salvar_config(cfg)
-
-    nome = message.from_user.first_name or vencedor["nome"]
-    logger.info("Prêmio reivindicado por %s (%s)", nome, message.from_user.id)
-
-    bot.reply_to(
-        message,
-        f"🏆 Prêmio confirmado, *{nome}*! Parabéns!\n\n"
-        "O admin entrará em contato para entregar o prêmio. 🎊",
-        parse_mode="Markdown",
-    )
-    bot.send_message(
-        ADMIN_ID,
-        f"✅ *{nome}* (ID {message.from_user.id}) reivindicou o prêmio!\n"
-        "Entre em contato para entregar.",
-        parse_mode="Markdown",
-    )
-
-
-@bot.message_handler(commands=["sortear"])
-def cmd_sortear(message: telebot.types.Message) -> None:
-    """Admin realiza o sorteio manualmente."""
-    if not _is_admin(message.from_user.id):
-        bot.reply_to(message, "❌ Comando exclusivo para admins.")
-        return
-
-    bot.reply_to(message, "🎰 Iniciando sorteio... acompanhe o log do terminal.")
-    try:
-        _sortear_vencedor(chat_id=message.chat.id)
-    except Exception as exc:
-        logger.error("[SORTEIO] Erro inesperado: %s", exc, exc_info=True)
-        bot.send_message(
-            message.chat.id,
-            f"❌ *Erro no sorteio:*\n`{exc}`\n\nVeja o log completo no terminal do Replit.",
-            parse_mode="Markdown",
-        )
-
-
-@bot.message_handler(commands=["setar_sorteio"])
-def cmd_setar_sorteio(message: telebot.types.Message) -> None:
-    """Admin configura meta e prêmio: /setar_sorteio 500 Impressora Bambu A1"""
-    if not _is_admin(message.from_user.id):
-        bot.reply_to(message, "❌ Comando exclusivo para admins.")
-        return
-
-    partes = message.text.split(maxsplit=2)
-    if len(partes) < 3:
-        bot.reply_to(message, "Uso: /setar\\_sorteio [meta] [descrição do prêmio]\nEx: /setar\\_sorteio 500 Impressora Bambu A1")
-        return
-
-    try:
-        meta   = int(partes[1])
-        premio = partes[2].strip()
-    except ValueError:
-        bot.reply_to(message, "❌ A meta precisa ser um número inteiro.")
-        return
-
-    cfg = _carregar_config()
-    cfg["META_SORTEIO"]       = meta
-    cfg["PREMIO_ATUAL"]       = premio
-    cfg["ALERTA_90_ENVIADO"]  = False
-    _salvar_config(cfg)
-
-    logger.info("Admin atualizou sorteio: meta=%d, prêmio=%s", meta, premio)
-    bot.reply_to(
-        message,
-        f"✅ Sorteio atualizado!\n🎯 Meta: *{meta}* membros no canal\n🏆 Prêmio: *{premio}*",
-        parse_mode="Markdown",
-    )
-
-
-@bot.message_handler(commands=["ping"])
-def cmd_ping(message: telebot.types.Message) -> None:
-    """Verifica se o bot está online e exibe um resumo rápido de saúde."""
-    agora     = datetime.datetime.now()
-    uptime    = agora - _start_time
-    horas     = int(uptime.total_seconds() // 3600)
-    minutos   = int((uptime.total_seconds() % 3600) // 60)
-    segundos  = int(uptime.total_seconds() % 60)
-
-    cfg           = _carregar_config()
-    participantes = _carregar_participantes()
-    membros       = _get_membros_grupo()
-    meta          = cfg["META_SORTEIO"]
-    premio        = cfg["PREMIO_ATUAL"]
-
-    membros_str = str(membros) if membros >= 0 else "indisponível"
-    faltam      = max(0, meta - membros) if membros >= 0 else "?"
-
-    sorteio_ok = membros >= 0 and membros >= meta
-    sorteio_ico = "🟢" if sorteio_ok else "🔴"
-
-    bot.reply_to(
-        message,
-        f"🏓 *Pong!* Bot está online e respondendo.\n\n"
-        f"⏱️ *Uptime:* {horas}h {minutos}m {segundos}s\n"
-        f"📅 *Iniciado em:* {_start_time.strftime('%d/%m/%Y às %H:%M')}\n\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"🎁 *Prêmio:* {premio}\n"
-        f"👥 *Canal:* {membros_str} / {meta} membros\n"
-        f"📋 *Inscritos:* {len(participantes)}\n"
-        f"{sorteio_ico} *Sorteio:* {'liberado' if sorteio_ok else f'bloqueado — faltam {faltam}'}\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"_Todos os sistemas operacionais._ ✅",
-        parse_mode="Markdown",
-    )
-    logger.info("Ping respondido para user %s — uptime %dh%dm", message.from_user.id, horas, minutos)
+    _save_participants(participants)
+    
+    bot.reply_to(message, "🎉 Você entrou no sorteio! Boa sorte!")
+    logger.info("Novo participante: %s (%s)", nome, user_id)
 
 
 @bot.message_handler(commands=["status"])
-def cmd_status(message: telebot.types.Message) -> None:
-    """Admin vê status completo do sorteio."""
-    if not _is_admin(message.from_user.id):
-        bot.reply_to(message, "❌ Comando exclusivo para admins.")
-        return
-
-    cfg           = _carregar_config()
-    participantes = _carregar_participantes()
-    inscritos     = len(participantes)
-    meta          = cfg["META_SORTEIO"]
-    premio        = cfg["PREMIO_ATUAL"]
-    membros       = _get_membros_grupo()
-    faltam_meta   = max(0, meta - membros) if membros >= 0 else "?"
-    vencedor      = cfg.get("VENCEDOR_PENDENTE")
-
-    membros_str = str(membros) if membros >= 0 else "erro ao consultar"
-
-    linhas = [
-        f"📊 *Status do Sorteio*",
-        f"🏆 Prêmio: {premio}",
-        f"",
-        f"👥 *Membros no Grupo:* {membros_str} / Meta: {meta}  (faltam {faltam_meta})",
-        f"📋 *Inscritos no sorteio:* {inscritos}",
-        "",
-    ]
-
-    if vencedor:
-        deadline = datetime.datetime.fromisoformat(vencedor["deadline_iso"])
-        linhas.append(f"⏳ Vencedor pendente: *{vencedor['nome']}* (ID {vencedor['user_id']})")
-        linhas.append(f"⏰ Prazo: {deadline.strftime('%d/%m/%Y às %H:%M')}")
-    else:
-        linhas.append("🎰 Nenhum vencedor pendente.")
-
-    if participantes:
-        linhas.append("\n👤 *Últimos 10 inscritos:*")
-        for uid, dados in list(participantes.items())[-10:]:
-            username = f"@{dados['username']}" if dados.get("username") else "sem @"
-            linhas.append(f"  • {dados['nome']} ({username})")
-
-    bot.reply_to(message, "\n".join(linhas), parse_mode="Markdown")
-
-
-@bot.message_handler(commands=["resetar_sorteio"])
-def cmd_resetar_sorteio(message: telebot.types.Message) -> None:
-    """Admin limpa a lista de participantes para um novo sorteio."""
-    if not _is_admin(message.from_user.id):
-        bot.reply_to(message, "❌ Comando exclusivo para admins.")
-        return
-
-    _salvar_participantes({})
-
-    cfg = _carregar_config()
-    cfg["VENCEDOR_PENDENTE"] = None
-    _salvar_config(cfg)
-
-    logger.info("Admin resetou o sorteio.")
-    bot.reply_to(message, "♻️ Sorteio resetado! Lista de participantes limpa. Pronto para nova rodada.")
-
-
-@bot.message_handler(commands=["top10"])
-def cmd_top10(message: telebot.types.Message) -> None:
-    """Placar público com os primeiros inscritos no sorteio."""
-    participantes = _carregar_participantes()
-    cfg           = _carregar_config()
-    total         = len(participantes)
-    meta          = cfg["META_SORTEIO"]
-    premio        = cfg["PREMIO_ATUAL"]
-    membros       = _get_membros_grupo()
-    faltam        = max(0, meta - membros) if membros >= 0 else max(0, meta - total)
-    membros_str   = str(membros) if membros >= 0 else "?"
-
-    if not participantes:
-        bot.reply_to(
-            message,
-            f"📋 Ainda não há inscritos no sorteio!\n\n"
-            f"🏆 Prêmio: {premio}\n"
-            f"👥 Meta: {meta} membros no canal\n"
-            f"Faltam {faltam} para o sorteio!",
-            parse_mode="Markdown",
-        )
-        return
-
-    linhas = [f"🏆 *Placar do Sorteio*\n"]
-    linhas.append(f"🎁 Prêmio: *{premio}*")
-    linhas.append(f"👥 Membros: {membros_str}/{meta} — faltam {faltam}\n")
-
-    medalhas = ["🥇", "🥈", "🥉"]
-    for i, (uid, dados) in enumerate(list(participantes.items())[:10]):
-        icone    = medalhas[i] if i < 3 else f"{i+1}."
-        nome     = dados.get("nome", "Anônimo")
-        username = f" (@{dados['username']})" if dados.get("username") else ""
-        linhas.append(f"{icone} {nome}{username}")
-
-    if faltam > 0:
-        linhas.append(f"\n📢 Faltam *{faltam}* pessoas para o sorteio!\nParticipe: /participar")
-
-    texto = "\n".join(linhas)
-    bot.reply_to(message, texto, parse_mode="Markdown")
-
-
-# ---------------------------------------------------------------------------
-# Ferramentas Maker
-# ---------------------------------------------------------------------------
-
-@bot.message_handler(commands=["custo"])
-def cmd_custo(message: telebot.types.Message) -> None:
-    """/custo [horas] [gramas] [preco_kg]"""
-    partes = message.text.split()
-    if len(partes) != 4:
-        bot.reply_to(
-            message,
-            "📐 *Calculadora de Custo de Impressão*\n\n"
-            "Uso: /custo \\[horas\\] \\[gramas\\] \\[preco\\_kg\\]\n"
-            "Ex: `/custo 4 85 120`\n\n"
-            "_horas = tempo de impressão | gramas = peso da peça | preco\\_kg = R$ por kg de filamento_",
-            parse_mode="MarkdownV2",
-        )
-        return
-
-    try:
-        horas    = float(partes[1])
-        gramas   = float(partes[2])
-        preco_kg = float(partes[3])
-    except ValueError:
-        bot.reply_to(message, "❌ Use apenas números. Ex: `/custo 4 85 120`", parse_mode="Markdown")
-        return
-
-    custo_material  = (gramas / 1000) * preco_kg
-    custo_energia   = horas * 0.30
-    margem_energia  = custo_energia * 0.10
-    custo_total     = custo_material + custo_energia + margem_energia
-    custo_sugerido  = custo_total * 2
-
-    bot.reply_to(
-        message,
-        f"📐 *Custo de Impressão*\n\n"
-        f"🧵 Material ({gramas}g de filamento): R$ {custo_material:.2f}\n"
-        f"⚡ Energia ({horas}h): R$ {custo_energia:.2f}\n"
-        f"📈 Margem energia (10%): R$ {margem_energia:.2f}\n"
-        f"──────────────────\n"
-        f"💰 *Custo total: R$ {custo_total:.2f}*\n"
-        f"🏷️ Preço sugerido de venda (2×): R$ {custo_sugerido:.2f}",
-        parse_mode="Markdown",
+def cmd_status(message):
+    """Handler para /status — mostra status do sorteio."""
+    config = _load_config()
+    participants = _load_participants()
+    
+    total_pontos = sum(p.get("pontos", 0) for p in participants.values())
+    meta = config.get("META_SORTEIO", 1000)
+    
+    texto = (
+        f"📊 *Status do Sorteio*\n\n"
+        f"Meta: {meta} pontos\n"
+        f"Atual: {total_pontos} pontos\n"
+        f"Progresso: {(total_pontos / meta * 100):.1f}%\n"
+        f"Participantes: {len(participants)}\n"
     )
+    bot.reply_to(message, texto)
 
 
 # ---------------------------------------------------------------------------
-# /ajuda — Menu de tópicos técnicos com Gemini
+# Agendamento de tarefas
 # ---------------------------------------------------------------------------
 
-_TOPICOS_AJUDA = {
-    "mesa":      "Mesa não gruda",
-    "zwobble":   "Z-Wobble / Linhas tortas",
-    "suporte":   "Configuração de Suporte",
-    "retract":   "Retração e Stringing",
-    "resina":    "Cura e Tempo de Exposição (Resina)",
-    "filamento": "Como armazenar Filamento",
-}
+def agendar_tarefas():
+    """Agenda todas as tarefas recorrentes."""
+    logger.info("Agendando tarefas...")
 
+    # Promoções a cada 3 horas
+    schedule.every(3).hours.do(postar_promocao)
 
-def _teclado_ajuda() -> telebot.types.InlineKeyboardMarkup:
-    teclado = telebot.types.InlineKeyboardMarkup(row_width=2)
-    botoes  = [
-        telebot.types.InlineKeyboardButton(texto, callback_data=f"ajuda:{chave}")
-        for chave, texto in _TOPICOS_AJUDA.items()
-    ]
-    teclado.add(*botoes)
-    return teclado
+    # Conteúdo educativo a cada 4 horas
+    schedule.every(4).hours.do(postar_educativo)
 
+    # Notícias a cada 6 horas
+    schedule.every(6).hours.do(postar_noticia)
 
-@bot.message_handler(commands=["ajuda"])
-def cmd_ajuda(message: telebot.types.Message) -> None:
-    logger.info("Comando /ajuda (user: %s)", message.from_user.id)
-    bot.send_message(
-        message.chat.id,
-        "🛠️ *Central de Ajuda para Makers*\n\nEscolha o tópico que está com dificuldade:",
-        parse_mode="Markdown",
-        reply_markup=_teclado_ajuda(),
-    )
+    # Top 10 do sorteio diariamente ao meio-dia
+    schedule.every().day.at("12:00").do(_postar_top10_sorteio)
 
+    # Verificação de deadline de reivindicação a cada 30 minutos
+    schedule.every(30).minutes.do(_verificar_reivindicacao)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("ajuda:"))
-def callback_ajuda(call: telebot.types.CallbackQuery) -> None:
-    chave  = call.data.split(":")[1]
-    topico = _TOPICOS_AJUDA.get(chave, chave)
-
-    bot.answer_callback_query(call.id, f"🔍 Consultando Gemini sobre: {topico}...")
-    bot.send_message(call.message.chat.id, f"⏳ Gerando resposta sobre *{topico}*...", parse_mode="Markdown")
-
-    if not _gemini:
-        bot.send_message(
-            call.message.chat.id,
-            f"❌ Gemini não está disponível neste momento.",
-            parse_mode="Markdown",
-        )
-        return
-
-    try:
-        prompt = (
-            f"Você é um maker experiente e professor didático de impressão 3D. "
-            f"Explique de forma clara, amigável e com emojis como resolver o problema: '{topico}'. "
-            f"Use linguagem simples, dê passos práticos e termine com uma dica extra. "
-            f"Seja detalhado mas não prolixo."
-        )
-        resposta = _gemini.models.generate_content(model="gemini-2.5-flash", contents=prompt).text.strip()
-        bot.send_message(
-            call.message.chat.id,
-            f"🛠️ *{topico}*\n\n{resposta}\n\n_Precisa de mais ajuda? Use /ajuda_",
-            parse_mode="Markdown",
-            reply_markup=_teclado_ajuda(),
-        )
-        logger.info("Ajuda Gemini entregue para tópico '%s'", topico)
-    except Exception as e:
-        logger.error("Erro no callback de ajuda '%s': %s", chave, e)
-        bot.send_message(call.message.chat.id, f"❌ Erro ao consultar o Gemini: {e}")
-
-
-# ---------------------------------------------------------------------------
-# Boas-vindas automáticas para novos membros
-# ---------------------------------------------------------------------------
-
-@bot.message_handler(content_types=["new_chat_members"])
-def cmd_boas_vindas(message: telebot.types.Message) -> None:
-    """Envia boas-vindas a cada novo membro que entrar no grupo."""
-    cfg    = _carregar_config()
-    premio = cfg.get("PREMIO_ATUAL", "em breve!")
-    meta   = cfg.get("META_SORTEIO", 1000)
-
-    for novo in message.new_chat_members:
-        if novo.is_bot:
-            continue
-
-        nome = novo.first_name or "Membro"
-        logger.info("Novo membro: %s (%s) no chat %s", nome, novo.id, message.chat.id)
-
-        teclado = telebot.types.InlineKeyboardMarkup()
-        teclado.add(
-            telebot.types.InlineKeyboardButton(
-                "🎰 Participar do Sorteio",
-                url="https://t.me/AliexpressSemTaxaBot?start=sorteio",
-            )
-        )
-
-        try:
-            bot.send_message(
-                message.chat.id,
-                f"👋 Bem-vindo(a), *{nome}*! Que bom ter você aqui! 🎉\n\n"
-                f"Você entrou na comunidade certa — aqui a gente compartilha as *melhores ofertas* "
-                f"do AliExpress sem taxas e dicas de impressão 3D. 🖨️\n\n"
-                f"🏆 Temos um sorteio rolando!\n"
-                f"Prêmio atual: *{premio}*\n"
-                f"Meta: *{meta}* participantes\n\n"
-                f"👇 Clique abaixo para se inscrever no sorteio agora: no privado digite o comando /participar",
-                parse_mode="Markdown",
-                reply_markup=teclado,
-            )
-        except Exception as e:
-            logger.error("Erro ao enviar boas-vindas para %s: %s", nome, e)
-
-
-# ---------------------------------------------------------------------------
-# /menu — Central de Controle (admin only)
-# ---------------------------------------------------------------------------
-
-def _teclado_menu() -> telebot.types.InlineKeyboardMarkup:
-    teclado = telebot.types.InlineKeyboardMarkup(row_width=2)
-    teclado.add(
-        telebot.types.InlineKeyboardButton("🎰 Iniciar Sorteio",    callback_data="menu:sortear"),
-        telebot.types.InlineKeyboardButton("📊 Status do Bot",       callback_data="menu:status"),
-        telebot.types.InlineKeyboardButton("⚙️ Configurar Meta",    callback_data="menu:config_meta"),
-        telebot.types.InlineKeyboardButton("🛒 Forçar Promoção",    callback_data="menu:promocao"),
-        telebot.types.InlineKeyboardButton("🛠️ Ferramentas Maker",  callback_data="menu:maker"),
-        telebot.types.InlineKeyboardButton("📋 Ver Inscritos",       callback_data="menu:inscritos"),
-        telebot.types.InlineKeyboardButton("🏓 Ping / Saúde",        callback_data="menu:ping"),
-        telebot.types.InlineKeyboardButton("🔄 Resetar Sorteio",    callback_data="menu:resetar"),
-        telebot.types.InlineKeyboardButton("❌ Fechar Menu",         callback_data="menu:fechar"),
-    )
-    return teclado
-
-
-def _teclado_maker_menu() -> telebot.types.InlineKeyboardMarkup:
-    teclado = telebot.types.InlineKeyboardMarkup(row_width=1)
-    teclado.add(
-        telebot.types.InlineKeyboardButton("📐 Calculadora de Custo",  callback_data="menu:maker_custo"),
-        telebot.types.InlineKeyboardButton("🛠️ Ajuda Técnica Gemini", callback_data="menu:maker_ajuda"),
-        telebot.types.InlineKeyboardButton("⬅️ Voltar ao Menu",        callback_data="menu:voltar"),
-    )
-    return teclado
-
-
-# Dicionário para rastrear estado de anúncio em progresso
-_anunciar_estado: dict = {}
-
-
-def _anunciar_passo_meta(message: telebot.types.Message) -> None:
-    """Primeira etapa do anúncio: recebe a meta."""
-    try:
-        nova_meta = int(message.text.strip())
-    except ValueError:
-        bot.reply_to(message, "❌ Use apenas números. Ex: `500`")
-        return
-
-    _anunciar_estado[message.from_user.id] = {"meta": nova_meta}
-
-    msg = bot.send_message(
-        message.chat.id,
-        f"2️⃣ Qual o *prêmio* para esta rodada?\n"
-        f"_(Ex: Impressora Bambu A1, 1KG de Resina, etc.)_",
-        parse_mode="Markdown",
-    )
-    bot.register_next_step_handler(msg, _anunciar_passo_premio)
-
-
-def _anunciar_passo_premio(message: telebot.types.Message) -> None:
-    """Segunda etapa do anúncio: recebe o prêmio e confirma."""
-    novo_premio = message.text.strip()
-    estado = _anunciar_estado.get(message.from_user.id, {})
-
-    if not estado:
-        bot.reply_to(message, "❌ Sessão expirou. Use /anunciar novamente.")
-        return
-
-    _anunciar_estado[message.from_user.id] = estado
-    _anunciar_estado[message.from_user.id]["premio"] = novo_premio
-
-    meta = estado.get("meta")
-    teclado = telebot.types.InlineKeyboardMarkup()
-    teclado.add(
-        telebot.types.InlineKeyboardButton("✅ Confirmar", callback_data="anunciar:confirmar"),
-        telebot.types.InlineKeyboardButton("❌ Cancelar",  callback_data="anunciar:cancelar"),
-    )
-
-    bot.send_message(
-        message.chat.id,
-        f"📋 *Resumo do Anúncio*\n\n"
-        f"🎯 Meta: *{meta}* participantes\n"
-        f"🏆 Prêmio: *{novo_premio}*\n\n"
-        f"Deseja publicar nos canais?",
-        parse_mode="Markdown",
-        reply_markup=teclado,
-    )
-
-
-def _montar_anuncio(meta: int, premio: str) -> str:
-    """Monta o texto do anúncio de sorteio."""
-    return (
-        f"🎊🎊🎊 *SORTEIO ESPECIAL!* 🎊🎊🎊\n\n"
-        f"🏆 *Prêmio:* {premio}\n"
-        f"👥 *Meta:* {meta} participantes no grupo\n\n"
-        f"📢 Quanto mais gente se inscrever, mais perto chegamos de liberar o sorteio!\n"
-        f"👉 Use /participar no privado para se inscrever.\n\n"
-        f"_Boa sorte! 🍀_"
-    )
-
-
-@bot.message_handler(commands=["anunciar"])
-def cmd_anunciar(message: telebot.types.Message) -> None:
-    """Admin inicia o processo de anúncio de sorteio."""
-    if not _is_admin(message.from_user.id):
-        bot.reply_to(message, "❌ Comando exclusivo para admins.")
-        return
-
-    cfg = _carregar_config()
-    msg = bot.send_message(
-        message.chat.id,
-        f"📢 *Publicar Sorteio nos Canais*\n\n"
-        f"Configuração atual:\n"
-        f"• Meta: *{cfg['META_SORTEIO']}* participantes\n"
-        f"• Prêmio: *{cfg['PREMIO_ATUAL']}*\n\n"
-        f"1️⃣ Qual a *nova meta* de participantes?\n"
-        f"_(Digite apenas o número, ex: `500`)_",
-        parse_mode="Markdown",
-    )
-    bot.register_next_step_handler(msg, _anunciar_passo_meta)
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("anunciar:"))
-def callback_anunciar(call: telebot.types.CallbackQuery) -> None:
-    """Confirmação ou cancelamento da publicação do sorteio."""
-    if not _is_admin(call.from_user.id):
-        bot.answer_callback_query(call.id, "❌ Acesso negado.")
-        return
-
-    acao   = call.data.split(":")[1]
-    estado = _anunciar_estado.get(call.from_user.id, {})
-
-    if acao == "cancelar" or not estado:
-        _anunciar_estado.pop(call.from_user.id, None)
-        bot.answer_callback_query(call.id, "Cancelado.")
-        bot.edit_message_text(
-            "❌ Publicação cancelada. Use /anunciar para recomeçar.",
-            call.message.chat.id,
-            call.message.message_id,
-        )
-        return
-
-    if acao == "confirmar":
-        meta   = estado.get("meta")
-        premio = estado.get("premio")
-        _anunciar_estado.pop(call.from_user.id, None)
-
-        if not meta or not premio:
-            bot.answer_callback_query(call.id, "Dados incompletos. Tente /anunciar novamente.")
-            return
-
-        # Salva no config.json
-        cfg = _carregar_config()
-        cfg["META_SORTEIO"] = meta
-        cfg["PREMIO_ATUAL"]  = premio
-        _salvar_config(cfg)
-        _audit(call.from_user.id, "CONFIG_META", f"meta={meta} premio={premio}")
-
-        bot.answer_callback_query(call.id, "✅ Publicando...")
-        bot.edit_message_text(
-            f"⏳ Publicando nos {len(CANAIS_DESTINO)} canais...",
-            call.message.chat.id,
-            call.message.message_id,
-        )
-
-        texto_anuncio = _montar_anuncio(meta, premio)
-        teclado_canal = telebot.types.InlineKeyboardMarkup()
-        teclado_canal.add(
-            telebot.types.InlineKeyboardButton(
-                "✋ Participar do Sorteio",
-                url="https://t.me/AliexpressSemTaxaBot?start=sorteio",
-            )
-        )
-
-        erros = []
-        for canal in CANAIS_DESTINO:
-            try:
-                bot.send_message(
-                    canal,
-                    texto_anuncio,
-                    parse_mode="Markdown",
-                    reply_markup=teclado_canal,
-                )
-                logger.info("Anúncio de sorteio publicado em %s", canal)
-            except Exception as e:
-                logger.error("Erro ao publicar anúncio em %s: %s", canal, e)
-                erros.append(canal)
-
-        if erros:
-            resumo = f"⚠️ Publicado com erros nos canais: {', '.join(erros)}"
-        else:
-            resumo = f"✅ Anúncio publicado em *{len(CANAIS_DESTINO)} canais*!\n\nMeta: {meta} | Prêmio: {premio}"
-
-        bot.send_message(call.message.chat.id, resumo, parse_mode="Markdown")
-        logger.info("Admin publicou sorteio: meta=%d, prêmio=%s", meta, premio)
-
-
-@bot.message_handler(commands=["menu"])
-def cmd_menu_controle(message: telebot.types.Message) -> None:
-    if not _is_admin(message.from_user.id):
-        bot.reply_to(message, "❌ Menu exclusivo para o admin.")
-        return
-    logger.info("Admin abriu /menu (chat: %s)", message.chat.id)
-    bot.send_message(
-        message.chat.id,
-        "🛠️ *Central de Controle Mago 3D*\nEscolha uma operação:",
-        parse_mode="Markdown",
-        reply_markup=_teclado_menu(),
-    )
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("menu:"))
-def callback_menu(call: telebot.types.CallbackQuery) -> None:
-    if not _is_admin(call.from_user.id):
-        bot.answer_callback_query(call.id, "❌ Acesso negado.")
-        return
-
-    acao = call.data.split(":")[1]
-    logger.info("[MENU] Ação: %s (user: %s)", acao, call.from_user.id)
-
-    # Fechar
-    if acao == "fechar":
-        bot.answer_callback_query(call.id, "Menu fechado.")
-        try:
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-        except Exception:
-            bot.edit_message_text("_Menu fechado._", call.message.chat.id,
-                                  call.message.message_id, parse_mode="Markdown")
-        return
-
-    # Voltar ao menu principal
-    if acao == "voltar":
-        bot.answer_callback_query(call.id)
-        bot.edit_message_text(
-            "🛠️ *Central de Controle Mago 3D*\nEscolha uma operação:",
-            call.message.chat.id, call.message.message_id,
-            parse_mode="Markdown", reply_markup=_teclado_menu(),
-        )
-        return
-
-    # Iniciar Sorteio
-    if acao == "sortear":
-        cfg     = _carregar_config()
-        meta    = cfg["META_SORTEIO"]
-        membros = _get_membros_grupo()
-
-        if membros >= 0 and membros < meta:
-            bot.answer_callback_query(call.id, f"❌ Meta não atingida: {membros}/{meta}")
-            bot.send_message(
-                call.message.chat.id,
-                f"❌ *Meta não atingida!*\n\n"
-                f"👥 Total no canal: *{membros}* / Meta: *{meta}*\n"
-                f"Faltam *{meta - membros}* membros para liberar o sorteio.\n\n"
-                f"_O vencedor será sorteado apenas entre os inscritos no /participar._",
-                parse_mode="Markdown",
-            )
-            return
-
-        participantes = _carregar_participantes()
-        if not participantes:
-            bot.answer_callback_query(call.id, "⚠️ Sem participantes inscritos!")
-            bot.send_message(call.message.chat.id,
-                "⚠️ Não há participantes inscritos.\n"
-                "Use /anunciar para divulgar o sorteio primeiro.")
-            return
-
-        try:
-            _sortear_vencedor(chat_id=call.message.chat.id)
-            _audit(call.from_user.id, "SORTEAR", f"inscritos={len(participantes)}")
-        except Exception as exc:
-            logger.error("[MENU:sortear] %s", exc, exc_info=True)
-            bot.send_message(call.message.chat.id,
-                f"❌ *Erro no sorteio:*\n`{exc}`", parse_mode="Markdown")
-        return
-
-    # Status do Bot
-    if acao == "status":
-        bot.answer_callback_query(call.id, "📊 Carregando status...")
-        cfg           = _carregar_config()
-        participantes = _carregar_participantes()
-        inscritos     = len(participantes)
-        meta          = cfg["META_SORTEIO"]
-        premio        = cfg["PREMIO_ATUAL"]
-        membros       = _get_membros_grupo()
-        faltam_meta   = max(0, meta - membros) if membros >= 0 else "?"
-        vencedor      = cfg.get("VENCEDOR_PENDENTE")
-
-        membros_str = str(membros) if membros >= 0 else "erro ao consultar"
-
-        linhas = [
-            "📊 *Status do Bot — Mago 3D*\n",
-            f"🏆 Prêmio: {premio}",
-            f"",
-            f"👥 *Membros no Grupo:* {membros_str} / Meta: {meta}  (faltam {faltam_meta})",
-            f"📋 *Inscritos no sorteio:* {inscritos}",
-        ]
-        if vencedor:
-            dl = datetime.datetime.fromisoformat(vencedor["deadline_iso"])
-            linhas.append(f"\n⏳ Vencedor pendente: *{vencedor['nome']}* até {dl.strftime('%d/%m %H:%M')}")
-        else:
-            linhas.append("\n🎰 Sem vencedor pendente.")
-
-        if participantes:
-            linhas.append(f"\n👤 Últimos 5 inscritos:")
-            for uid, d in list(participantes.items())[-5:]:
-                user = f"@{d['username']}" if d.get("username") else "sem @"
-                linhas.append(f"  • {d['nome']} ({user})")
-
-        bot.send_message(call.message.chat.id, "\n".join(linhas),
-                         parse_mode="Markdown", reply_markup=_teclado_menu())
-        return
-
-    # Configurar Meta
-    if acao == "config_meta":
-        bot.answer_callback_query(call.id)
-        cfg = _carregar_config()
-        msg = bot.send_message(
-            call.message.chat.id,
-            f"⚙️ *Configurar Sorteio*\n\n"
-            f"Configuração atual:\n"
-            f"• Meta: *{cfg['META_SORTEIO']}* participantes\n"
-            f"• Prêmio: *{cfg['PREMIO_ATUAL']}*\n\n"
-            f"1️⃣ Qual a *nova meta*? _(só o número, ex: `500`)_",
-            parse_mode="Markdown",
-        )
-        bot.register_next_step_handler(msg, _anunciar_passo_meta)
-        return
-
-    # Forçar Promoção
-    if acao == "promocao":
-        bot.answer_callback_query(call.id, "🛒 Buscando promoção...")
-        bot.send_message(call.message.chat.id,
-            "🛒 Buscando oferta no AliExpress, aguarde...")
-        try:
-            postar_promocao()
-            _audit(call.from_user.id, "FORCAR_PROMOCAO")
-            bot.send_message(call.message.chat.id,
-                "✅ Promoção disparada nos canais!", reply_markup=_teclado_menu())
-        except Exception as exc:
-            logger.error("[MENU:promocao] %s", exc, exc_info=True)
-            bot.send_message(call.message.chat.id,
-                f"❌ *Erro na promoção:*\n`{exc}`", parse_mode="Markdown")
-        return
-
-    # Ferramentas Maker
-    if acao == "maker":
-        bot.answer_callback_query(call.id)
-        bot.edit_message_text(
-            "🛠️ *Ferramentas Maker*\nEscolha uma ferramenta:",
-            call.message.chat.id, call.message.message_id,
-            parse_mode="Markdown", reply_markup=_teclado_maker_menu(),
-        )
-        return
-
-    if acao == "maker_custo":
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id,
-            "📐 *Calculadora de Custo de Impressão*\n\n"
-            "Envie o comando com os valores:\n"
-            "`/custo [horas] [gramas] [preco_kg]`\n\n"
-            "Ex: `/custo 4 85 120`\n"
-            "_horas = tempo | gramas = peso | preco\\_kg = R$ por kg_",
-            parse_mode="Markdown",
-            reply_markup=_teclado_maker_menu(),
-        )
-        return
-
-    if acao == "maker_ajuda":
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id,
-            "🛠️ *Central de Ajuda para Makers*\n\nEscolha o tópico:",
-            parse_mode="Markdown",
-            reply_markup=_teclado_ajuda(),
-        )
-        return
-
-    # Ver Inscritos
-    if acao == "inscritos":
-        bot.answer_callback_query(call.id, "📋 Carregando lista...")
-        participantes = _carregar_participantes()
-        cfg    = _carregar_config()
-        total  = len(participantes)
-        meta   = cfg["META_SORTEIO"]
-        premio = cfg["PREMIO_ATUAL"]
-
-        if not participantes:
-            bot.send_message(call.message.chat.id,
-                f"📋 *Inscritos no Sorteio*\n\n"
-                f"Nenhum participante ainda.\n"
-                f"🏆 Prêmio: {premio} | 🎯 Meta: {meta}",
-                parse_mode="Markdown", reply_markup=_teclado_menu())
-            return
-
-        linhas_header = [
-            f"📋 *Lista de Inscritos — {total}/{meta}*",
-            f"🏆 Prêmio: {premio}\n",
-        ]
-        bloco  = list(linhas_header)
-        blocos = []
-        for i, (uid, dados) in enumerate(participantes.items(), 1):
-            username = f" @{dados['username']}" if dados.get("username") else ""
-            inscrito = dados.get("inscrito_em", "")[:10]
-            linha    = f"{i}. {dados['nome']}{username} _(ID {uid} — {inscrito})_"
-            bloco.append(linha)
-            if len(bloco) >= 32:
-                blocos.append("\n".join(bloco))
-                bloco = []
-        if bloco:
-            blocos.append("\n".join(bloco))
-
-        for parte in blocos:
-            try:
-                bot.send_message(call.message.chat.id, parte,
-                                 parse_mode="Markdown")
-            except Exception as exc:
-                logger.error("Erro ao enviar bloco de inscritos: %s", exc)
-
-        bot.send_message(call.message.chat.id,
-            f"✅ Total: *{total}* inscritos | Faltam *{max(0, meta-total)}* para a meta.",
-            parse_mode="Markdown", reply_markup=_teclado_menu())
-        return
-
-    # Resetar Sorteio
-    if acao == "resetar":
-        if call.from_user.id != ADMIN_ID:
-            bot.answer_callback_query(call.id, "❌ Acesso negado — apenas o admin pode resetar.")
-            return
-
-        bot.answer_callback_query(call.id, "⏳ Resetando...")
-
-        try:
-            with open(PARTICIPANTS_FILE, "w", encoding="utf-8") as f:
-                json.dump({}, f, indent=4)
-            logger.info("[RESET] participants.json limpo com sucesso pelo admin %s.", call.from_user.id)
-            _audit(call.from_user.id, "RESETAR_SORTEIO", "participants.json zerado")
-        except Exception as e:
-            logger.error("[RESET] Falha ao limpar participants.json: %s", e)
-            bot.send_message(
-                call.message.chat.id,
-                f"❌ *Erro ao resetar o sorteio:*\n`{e}`",
-                parse_mode="Markdown",
-            )
-            return
-
-        cfg = _carregar_config()
-        cfg["VENCEDOR_PENDENTE"] = None
-        _salvar_config(cfg)
-
-        bot.send_message(
-            call.message.chat.id,
-            "♻️ *Sorteio resetado com sucesso!*\n\n"
-            "✅ `participants.json` limpo — dicionário vazio gravado.\n"
-            "✅ Vencedor pendente removido do `config.json`.\n\n"
-            "_Pronto para uma nova rodada!_",
-            parse_mode="Markdown",
-            reply_markup=_teclado_menu(),
-        )
-        return
-
-    # Ping / Saúde
-    if acao == "ping":
-        bot.answer_callback_query(call.id, "🏓 Verificando saúde...")
-        agora    = datetime.datetime.now()
-        uptime   = agora - _start_time
-        horas    = int(uptime.total_seconds() // 3600)
-        minutos  = int((uptime.total_seconds() % 3600) // 60)
-        segundos = int(uptime.total_seconds() % 60)
-
-        cfg           = _carregar_config()
-        participantes = _carregar_participantes()
-        membros       = _get_membros_grupo()
-        meta          = cfg["META_SORTEIO"]
-        premio        = cfg["PREMIO_ATUAL"]
-
-        membros_str = str(membros) if membros >= 0 else "indisponível"
-        faltam      = max(0, meta - membros) if membros >= 0 else "?"
-        sorteio_ok  = membros >= 0 and membros >= meta
-        sorteio_ico = "🟢" if sorteio_ok else "🔴"
-
-        bot.send_message(
-            call.message.chat.id,
-            f"🏓 *Pong!* Bot está online e respondendo.\n\n"
-            f"⏱️ *Uptime:* {horas}h {minutos}m {segundos}s\n"
-            f"📅 *Iniciado em:* {_start_time.strftime('%d/%m/%Y às %H:%M')}\n\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"🎁 *Prêmio:* {premio}\n"
-            f"👥 *Canal:* {membros_str} / {meta} membros\n"
-            f"📋 *Inscritos:* {len(participantes)}\n"
-            f"{sorteio_ico} *Sorteio:* {'liberado' if sorteio_ok else f'bloqueado — faltam {faltam}'}\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"_Todos os sistemas operacionais._ ✅",
-            parse_mode="Markdown",
-            reply_markup=_teclado_menu(),
-        )
-        return
-
-    bot.answer_callback_query(call.id, "❓ Ação desconhecida.")
-
-
-# ---------------------------------------------------------------------------
-# Loop de agendamento (thread secundária)
-# ---------------------------------------------------------------------------
-
-def _loop_agendamento() -> None:
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
-
-
-# ---------------------------------------------------------------------------
-# Entrada principal
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    logger.info("🤖 Bot de Impressão 3D iniciando...")
-
-    # Inicia o servidor Flask em uma thread separada para keep-alive
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("✅ Servidor de monitoramento ativo na porta 10000")
-
-    # Remove webhook e aguarda conexões anteriores expirarem no lado do Telegram
-    for tentativa in range(1, 6):
-        try:
-            bot.delete_webhook(drop_pending_updates=True)
-            logger.info("Webhook removido com sucesso.")
-            break
-        except Exception as e:
-            logger.warning("Tentativa %d — falha ao remover webhook: %s", tentativa, e)
-            time.sleep(5)
-
-    # Aguarda a conexão de getUpdates anterior expirar no Telegram
-    logger.info("Aguardando 10 s para garantir que não há outra instância ativa...")
-    time.sleep(10)
-
-    configurar_agendamentos()
-
-    agendamento_thread = threading.Thread(target=_loop_agendamento, daemon=True)
-    agendamento_thread.start()
+    # Alerta de 90% a cada 2 horas
+    schedule.every(2).hours.do(_alerta_90_porcento)
 
     logger.info("✅ Agendamentos e polling de comandos ativos!")
 
-    # CORREÇÃO: Simplificar o loop de polling
-    # O infinity_polling já tem seu próprio retry interno
-    try:
-        bot.infinity_polling(
-            timeout=30,
-            long_polling_timeout=20,
-            skip_pending=True,
-            logger_level=logging.WARNING,
-        )
-    except Exception as exc:
-        logger.error("Erro fatal no polling: %s", exc, exc_info=True)
-        raise
 
+def rodar_scheduler():
+    """Loop que executa tarefas agendadas."""
+    while True:
+        try:
+            schedule.run_pending()
+            time.sleep(1)
+        except Exception as e:
+            logger.error("Erro no scheduler: %s", e)
+            time.sleep(5)
+
+
+# ---------------------------------------------------------------------------
+# Polling de mensagens do Telegram
+# ---------------------------------------------------------------------------
+
+def rodar_polling():
+    """Loop de polling de mensagens do Telegram."""
+    logger.info("Iniciando polling do Telegram...")
+    try:
+        bot.infinity_polling(timeout=10, long_polling_timeout=5)
+    except Exception as e:
+        logger.error("Erro no polling: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    main()
+    logger.info("🤖 Bot de Impressão 3D iniciando...")
+    logger.info("✅ Servidor de monitoramento ativo na porta 10000")
+
+    # Inicia Flask em thread separada
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=10000, debug=False), daemon=True).start()
+
+    # Remove webhook anterior (se houver)
+    try:
+        bot.remove_webhook()
+        time.sleep(1)
+        logger.info("Webhook removido com sucesso.")
+    except Exception as e:
+        logger.warning("Erro ao remover webhook: %s", e)
+
+    # Aguarda um pouco para garantir que não há outra instância
+    logger.info("Aguardando 10 s para garantir que não há outra instância ativa...")
+    time.sleep(10)
+
+    # Agenda tarefas
+    agendar_tarefas()
+
+    # Inicia scheduler e polling em threads separadas
+    scheduler_thread = threading.Thread(target=rodar_scheduler, daemon=True)
+    polling_thread = threading.Thread(target=rodar_polling, daemon=True)
+
+    scheduler_thread.start()
+    polling_thread.start()
+
+    # Mantém a aplicação rodando
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Bot interrompido pelo usuário")
