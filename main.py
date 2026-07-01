@@ -450,7 +450,7 @@ def _postar_promocao_fallback(keyword: str) -> None:
             f"Tá cheio de coisa boa com preço incrível. Corre lá! 🚀🖨️"
         )
 
-    busca_url = f"https://www.aliexpress.com/wholesale?SearchText={keyword.replace(" ", "+")}"
+    busca_url = f"https://www.aliexpress.com/wholesale?SearchText={keyword.replace(' ', '+')}"
     link_afiliado = _gerar_link_afiliado_url(busca_url) or busca_url
 
     texto_html = (
