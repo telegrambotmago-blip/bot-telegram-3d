@@ -11,7 +11,6 @@ import schedule
 import feedparser
 import requests
 import telebot
-import google.generativeai as genai
 from flask import Flask
 
 # ---------------------------------------------------------------------------
@@ -27,7 +26,6 @@ logger = logging.getLogger(__name__)
 # Variáveis de ambiente
 # ---------------------------------------------------------------------------
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
-GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY", "")
 ALI_APP_KEY      = os.getenv("ALI_APP_KEY", "")
 ALI_APP_SECRET   = os.getenv("ALI_APP_SECRET", "")
 ALI_TRACKING_ID  = os.getenv("ALI_TRACKING_ID", "")
@@ -141,10 +139,9 @@ def _salvar_participantes(data: dict) -> None:
 _timer_reivindicacao: threading.Timer | None = None
 
 # ---------------------------------------------------------------------------
-# Inicialização do bot e Gemini
+# Inicialização do bot
 # ---------------------------------------------------------------------------
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-_gemini = genai.Client(api_key=GEMINI_API_KEY)
 
 _start_time = datetime.datetime.now()  # uptime tracking
 
@@ -285,58 +282,28 @@ def _gerar_link_afiliado_url(url: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def gemini_copy_promocao(titulo: str, preco_original: float, preco_desconto: float) -> str:
-    """Gera copy de promoção com o Gemini. Em caso de falha retorna template local."""
-    prompt = (
-        "Aja como um maker experiente, entusiasmado e muito descontraído. "
-        "Escreva uma copy CURTA (máximo 500 caracteres) recomendando este produto de Impressão 3D para amigos. "
-        "Estrutura obrigatória: "
-        "1. Uma linha de título chamativo com emojis. "
-        "2. Dois ou três frases explicando o benefício principal do produto. "
-        "Regras OBRIGATÓRIAS: "
-        "- Use SOMENTE texto puro, sem markdown (*texto*, **texto**), sem HTML, sem colchetes. "
-        "- Não inclua preços nem links no texto (o sistema adiciona isso automaticamente). "
-        "- Máximo 500 caracteres no total.\n\n"
-        f"Produto: {titulo}"
-    )
-    try:
-        response = _gemini.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-        return response.text.strip()
-    except Exception as e:
-        logger.warning("Gemini indisponível para copy de produto, usando template local: %s", e)
-        titulo_curto = titulo[:80] + "..." if len(titulo) > 80 else titulo
-        desconto_pct = int((1 - preco_desconto / preco_original) * 100) if preco_original > 0 else 0
-        if desconto_pct >= 10:
-            return (
-                f"🔥 Oferta imperdível para a galera da impressão 3D!\n"
-                f"{titulo_curto}\n"
-                f"Desconto de {desconto_pct}% — aproveite enquanto dura! 🎯🖨️"
-            )
+    """Gera copy de promoção com template local."""
+    titulo_curto = titulo[:80] + "..." if len(titulo) > 80 else titulo
+    desconto_pct = int((1 - preco_desconto / preco_original) * 100) if preco_original > 0 else 0
+    if desconto_pct >= 10:
         return (
-            f"🖨️ Achado do dia para makers!\n"
+            f"🔥 Oferta imperdível para a galera da impressão 3D!\n"
             f"{titulo_curto}\n"
-            f"Preço ótimo, qualidade garantida. Corre antes que acabe! 🚀"
+            f"Desconto de {desconto_pct}% — aproveite enquanto dura! 🎯🖨️"
         )
+    return (
+        f"🖨️ Achado do dia para makers!\n"
+        f"{titulo_curto}\n"
+        f"Preço ótimo, qualidade garantida. Corre antes que acabe! 🚀"
+    )
 
 def gemini_dica_educativa() -> str:
-    """Solicita ao Gemini uma dica educativa sobre impressão 3D."""
-    prompt = (
-        "Aja como um maker experiente trocando ideia com amigos no WhatsApp. "
-        "Dê uma dica técnica de impressão 3D de forma extremamente humana e descontraída. "
-        "Termine com uma pergunta rápida. Seja breve e use emojis."
-    )
-    response = _gemini.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-    return response.text.strip()
+    """Retorna uma dica educativa sobre impressão 3D."""
+    return "💡 Dica Maker: Sempre nivele a mesa da sua impressora com a mesa e o bico quentes! A dilatação térmica faz diferença. Já nivelou a sua hoje? 🖨️"
 
 def gemini_resumir_noticia(titulo: str, conteudo: str) -> str:
-    """Resume uma notícia de impressão 3D com o Gemini."""
-    prompt = (
-        "Aja como um maker experiente. Resuma esta notícia do mundo da impressão 3D de forma simples, "
-        "humana e descontraída. Termine com uma pergunta para engajamento. "
-        "Seja breve e não use jargões difíceis.\n\n"
-        f"Título: {titulo}\nConteúdo: {conteudo[:1500]}"
-    )
-    response = _gemini.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-    return response.text.strip()
+    """Resume uma notícia de impressão 3D."""
+    return f"📰 Notícia Maker: {titulo}\n\nFique por dentro das novidades do mundo 3D! O que achou dessa novidade? 🤔"
 
 # ---------------------------------------------------------------------------
 # Envio de mensagens para os canais
