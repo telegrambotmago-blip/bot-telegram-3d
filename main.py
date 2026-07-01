@@ -772,25 +772,30 @@ def _alerta_90_porcento() -> None:
 # Handlers de comandos do bot
 # ---------------------------------------------------------------------------
 
-@bot.message_handler(commands=["start"])
+@bot.message_handler(commands=["start", "menu"])
 def cmd_start(message):
-    """Handler para /start."""
+    """Handler para /start e /menu."""
     args = message.text.split()
     
-    # Se veio com parâmetro 'sorteio', executa participação automática
+    # Se veio com parâmetro 'sorteio' no /start
     if len(args) > 1 and args[1] == "sorteio":
         cmd_participar(message)
         return
     
-    # Caso contrário, mostra menu de teste
+    # Menu principal
     texto = (
-        "👋 Olá! Sou o bot de promoções 3D.\n\n"
-        "Comandos disponíveis:\n"
-        "/testar — Testa uma promoção agora\n"
-        "/participar — Participa do sorteio\n"
-        "/status — Vê o status do sorteio\n"
+        "🤖 *Menu do Bot Maker 3D*\n\n"
+        "Aqui estão os comandos que você pode usar:\n\n"
+        "📢 *Promoções*\n"
+        "/testar — Força o bot a buscar e postar uma promoção agora\n\n"
+        "🎁 *Sorteio*\n"
+        "/participar — Entra na lista de participantes do sorteio atual\n"
+        "/status — Vê o progresso da meta e quantos pontos já temos\n\n"
+        "❓ *Ajuda*\n"
+        "/menu — Mostra esta mensagem novamente\n\n"
+        "_Dica: O bot posta promoções automaticamente a cada 3 horas!_"
     )
-    bot.reply_to(message, texto)
+    bot.reply_to(message, texto, parse_mode="Markdown")
 
 
 @bot.message_handler(commands=["testar"])
