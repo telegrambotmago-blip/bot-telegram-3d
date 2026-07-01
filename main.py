@@ -175,6 +175,12 @@ def health_check():
     return "OK", 200
 
 
+@app.route("/health", methods=["GET", "HEAD"])
+def health_check_path():
+    """Endpoint /health exigido pelo Render para zero-downtime deploys."""
+    return "OK", 200
+
+
 # ---------------------------------------------------------------------------
 # Keywords e constantes de preço
 # ---------------------------------------------------------------------------
