@@ -777,25 +777,21 @@ def cmd_start(message):
     """Handler para /start e /menu."""
     args = message.text.split()
     
-    # Se veio com parâmetro 'sorteio' no /start
+    # Se veio com parâmetro 'sorteio', executa participação automática
     if len(args) > 1 and args[1] == "sorteio":
         cmd_participar(message)
         return
     
-    # Menu principal
+    # Caso contrário, mostra menu original
     texto = (
-        "🤖 *Menu do Bot Maker 3D*\n\n"
-        "Aqui estão os comandos que você pode usar:\n\n"
-        "📢 *Promoções*\n"
-        "/testar — Força o bot a buscar e postar uma promoção agora\n\n"
-        "🎁 *Sorteio*\n"
-        "/participar — Entra na lista de participantes do sorteio atual\n"
-        "/status — Vê o progresso da meta e quantos pontos já temos\n\n"
-        "❓ *Ajuda*\n"
-        "/menu — Mostra esta mensagem novamente\n\n"
-        "_Dica: O bot posta promoções automaticamente a cada 3 horas!_"
+        "👋 Olá! Sou o bot de promoções 3D.\n\n"
+        "Comandos disponíveis:\n"
+        "/testar — Testa uma promoção agora\n"
+        "/participar — Participa do sorteio\n"
+        "/status — Vê o status do sorteio\n"
+        "/menu — Mostra este menu\n"
     )
-    bot.reply_to(message, texto, parse_mode="Markdown")
+    bot.reply_to(message, texto)
 
 
 @bot.message_handler(commands=["testar"])
