@@ -263,13 +263,38 @@ def _ali_request(metodo: str, parametros: dict) -> dict:
         return {}
 
 
+def buscar_hot_products_aliexpress(category_id: str = None) -> list[dict]:
+    """Busca produtos em alta (Hot Products) no AliExpress, filtrados por categoria."""
+    try:
+        parametros = {
+            "fields": "product_id,product_title,product_main_image_url,original_price,sale_price,product_url,evaluate_rate,lastest_volume",
+            "page_no": "1",
+            "page_size": "50",
+            "tracking_id": ALI_TRACKING_ID,
+        }
+        if category_id:
+            parametros["category_ids"] = category_id
+            
+        data = _ali_request("aliexpress.affiliate.hotproduct.query", parametros)
+        
+        produtos = (
+            data.get("aliexpress_affiliate_hotproduct_query_response", {})
+            .get("resp_result", {})
+            .get("result", {})
+            .get("products", {})
+            .get("product", [])
+        )
+        return produtos
+    except Exception as e:
+        logger.error("Erro ao buscar hot products: %s", e)
+        return []
+
 def buscar_produtos_aliexpress(keyword: str) -> list[dict]:
     """Busca produtos no AliExpress por keyword."""
     try:
         data = _ali_request(
             "aliexpress.affiliate.productlist.get",
             {
-                "app_signature": ALI_APP_SECRET,
                 "fields": "product_id,product_title,product_main_image_url,original_price,sale_price,product_url",
                 "keywords": keyword,
                 "page_no": "1",
@@ -456,23 +481,39 @@ def _montar_e_enviar_produto(produto: dict, keyword: str) -> None:
     """Monta e envia a promoção do produto para os canais."""
     try:
         titulo = produto.get("product_title", "Produto sem título")
-        preco_original = float(produto.get("original_price", 0))
-        preco_desconto = float(produto.get("sale_price", 0))
+        
+        # AliExpress API retorna preços em centavos ou decimais dependendo do endpoint
+        # Vamos normalizar: se for > 1000 e não tiver ponto decimal, provavelmente é centavos
+        raw_original = produto.get("original_price", 0)
+        raw_sale = produto.get("sale_price", 0)
+        
+        preco_original = float(raw_original)
+        preco_desconto = float(raw_sale)
+        
+        # Heurística para detectar centavos (ex: 7500 em vez de 75.00)
+        if preco_original > 500 and "." not in str(raw_original):
+            preco_original /= 100
+            preco_desconto /= 100
+
         foto = produto.get("product_main_image_url", "")
         product_id = produto.get("product_id", "")
 
         copy = gemini_copy_promocao(titulo, preco_original, preco_desconto)
+        
+        # Tenta gerar link de afiliado curto
         link = gerar_link_afiliado(product_id)
 
+        # Se falhar o encurtador, monta o link direto com tracking_id (Deep Link manual)
         if not link:
-            link = f"https://www.aliexpress.com/item/{product_id}.html"
+            link = f"https://s.click.aliexpress.com/e/_msGj6S?bz=300&dl=https://www.aliexpress.com/item/{product_id}.html"
+            logger.warning("Usando Deep Link manual para ID %s", product_id)
 
         texto = (
             f"{copy}\n\n"
-            f"💰 De: R$ {preco_original:.2f}\n"
-            f"🔥 Por: R$ {preco_desconto:.2f}\n"
+            f"💰 *De:* R$ {preco_original:.2f}\n"
+            f"🔥 *Por:* R$ {preco_desconto:.2f}\n"
             f"🔗 [Comprar no AliExpress]({link})\n\n"
-            f"_#impressao3d #aliexpress #oferta_"
+            f"_#impressao3d #aliexpress #oferta #maker_"
         )
 
         if foto:
@@ -510,63 +551,62 @@ def _postar_promocao_fallback(keyword: str) -> None:
 
 
 def postar_promocao() -> None:
-    """Busca produto no AliExpress e posta. Sempre posta algo — 3 camadas de fallback."""
+    """Busca produto no AliExpress e posta. Prioriza Hot Products de Impressão 3D."""
     global _keyword_index
 
     produto_escolhido: dict | None = None
-    keyword_usada = KEYWORDS[_keyword_index % len(KEYWORDS)]
+    keyword_usada = "Hot Products"
 
-    # Camada 1 & 2: percorre todas as keywords até achar produto
-    for tentativa in range(len(KEYWORDS)):
-        keyword = KEYWORDS[_keyword_index % len(KEYWORDS)]
-        _keyword_index += 1
-        logger.info("Buscando produtos AliExpress — keyword: '%s' (tentativa %d/%d)",
-                    keyword, tentativa + 1, len(KEYWORDS))
-        try:
-            todos = buscar_produtos_aliexpress(keyword)
-        except Exception as e:
-            logger.error("Erro na API AliExpress para '%s': %s", keyword, e)
-            continue
-
-        if not todos:
-            logger.warning("API não retornou nenhum produto para '%s'", keyword)
-            continue
-
-        # Tenta com filtro de preço primeiro (camada 1)
-        filtrados = filtrar_por_preco(todos)
-        if filtrados:
-            produto_escolhido = filtrados[0]
-            keyword_usada = keyword
-            logger.info("Produto encontrado com filtro de preço — '%s'", keyword)
-            break
-
-        # Sem filtro: usa o produto mais barato disponível (camada 2)
-        try:
-            produto_escolhido = min(todos, key=lambda p: float(p.get("sale_price", 9999)))
-            keyword_usada = keyword
-            logger.info("Produto encontrado sem filtro de preço — '%s'", keyword)
-            break
-        except Exception:
-            continue
-
-    # Camada 3: fallback total via template
-    if not produto_escolhido:
-        logger.warning("Nenhum produto encontrado em %d keywords. Usando fallback.", len(KEYWORDS))
-        try:
-            _postar_promocao_fallback(keyword_usada)
-        except Exception as e:
-            logger.error("Fallback também falhou: %s", e)
-        return
-
-    # Produto encontrado — monta e envia
+    # Camada 1: Tenta buscar Hot Products (melhores ofertas gerais)
+    logger.info("Tentando buscar Hot Products do AliExpress...")
     try:
-        _montar_e_enviar_produto(produto_escolhido, keyword_usada)
+        # Categorias de eletrônicos/ferramentas costumam ter itens 3D
+        hot_produtos = buscar_hot_products_aliexpress()
+        if hot_produtos:
+            # Filtra por palavras-chave 3D para garantir relevância
+            filtrados = filtrar_por_preco(hot_produtos)
+            if filtrados:
+                produto_escolhido = random.choice(filtrados)
+                logger.info("✅ Produto escolhido via Hot Products (Filtrado)")
     except Exception as e:
-        logger.error("Erro ao montar promoção do produto: %s", e)
+        logger.error("Erro ao buscar Hot Products: %s", e)
+
+    # Camada 2: Se não achou em Hot Products, tenta via busca de keywords (como antes)
+    if not produto_escolhido:
+        for tentativa in range(min(5, len(KEYWORDS))): # Tenta as próximas 5 keywords
+            keyword = KEYWORDS[_keyword_index % len(KEYWORDS)]
+            _keyword_index += 1
+            logger.info("Buscando via keyword: '%s' (tentativa %d/5)", keyword, tentativa + 1)
+            try:
+                todos = buscar_produtos_aliexpress(keyword)
+                if todos:
+                    filtrados = filtrar_por_preco(todos)
+                    if filtrados:
+                        produto_escolhido = filtrados[0]
+                        keyword_usada = keyword
+                        break
+            except Exception as e:
+                logger.error("Erro na busca por keyword '%s': %s", keyword, e)
+                continue
+
+    # Camada 3: Se ainda não achou, pega qualquer um da busca por keyword (sem filtro de categoria, mas com preço)
+    if not produto_escolhido:
+        keyword = KEYWORDS[random.randint(0, len(KEYWORDS)-1)]
+        todos = buscar_produtos_aliexpress(keyword)
+        if todos:
+            # Pega o item com melhor avaliação ou menor preço
+            produto_escolhido = min(todos, key=lambda p: float(p.get("sale_price", 999999)))
+            keyword_usada = keyword
+            logger.info("✅ Produto escolhido via Fallback Keyword (Sem filtro 3D)")
+
+    # Se finalmente encontrou algo, envia
+    if produto_escolhido:
         try:
-            _postar_promocao_fallback(keyword_usada)
-        except Exception as e2:
-            logger.error("Fallback também falhou: %s", e2)
+            _montar_e_enviar_produto(produto_escolhido, keyword_usada)
+        except Exception as e:
+            logger.error("Erro ao montar promoção: %s", e)
+    else:
+        logger.error("❌ Nenhum produto encontrado em nenhuma camada.")
 
 
 # ---------------------------------------------------------------------------
