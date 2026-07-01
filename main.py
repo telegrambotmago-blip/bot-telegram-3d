@@ -11,7 +11,7 @@ import schedule
 import feedparser
 import requests
 import telebot
-import google.generativeai as genai
+from google.generativeai import GenerativeModel, configure
 from flask import Flask
 
 # ---------------------------------------------------------------------------
