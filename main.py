@@ -185,29 +185,37 @@ def health_check_path():
 # Keywords e constantes de preço
 # ---------------------------------------------------------------------------
 KEYWORDS = [
-    "3d",
-    "3d resin",
-    "fdm",
-    "3d printer",
-    "resin",
-    "saturn 4 ultra",
-    "mars 5 ultra",
-    "bambulab",
-    "photon p1",
-    "Kobra X",
-    "Kobra 4",
-    "Century Carbon",
-    "Creality",
-    "Elegoor",
-    "Anycubicr",
-    "Sunlu",
-    "Jayo",       
+    "Impressora 3D",
+    "3D Printer",
+    "Resina 3D",
+    "3D Resin",
+    "Filamento 3D",
+    "3D Filament",
+    "PLA Filament",
+    "PETG Filament",
+    "ABS Filament",
+    "Ender 3",
+    "Creality K1",
+    "Bambu Lab P1S",
+    "Bambu Lab A1",
+    "Elegoo Saturn",
+    "Elegoo Mars",
+    "Anycubic Photon",
+    "Anycubic Kobra",
+    "Sunlu Filament",
+    "Jayo Filament",
+    "Nozzle 3D",
+    "Hotend 3D",
+    "Extrusora 3D",
+    "FEP Film",
+    "LCD Screen 3D",
+    "Mainboard 3D Printer"
 ]
 _keyword_index = 0
 
 # Preços em centavos de real (USD $20 ≈ R$ 75 = 7500 centavos)
 # Filtramos apenas produtos 3D de qualidade (filamentos, resinas, impressoras, peças)
-PRECO_MIN = 7500      # R$ 75 / $20 USD (mínimo)
+PRECO_MIN = 2500      # R$ 25 (mínimo para peças e bicos)
 PRECO_MAX = 500000000 # R$ 5.000.000 (sem limite prático)
 
 # ---------------------------------------------------------------------------
@@ -326,13 +334,14 @@ def filtrar_por_preco(produtos: list[dict]) -> list[dict]:
     """
     # Palavras-chave que indicam produtos 3D de qualidade
     CATEGORIAS_3D = [
-        "filament", "filamento", "pla", "abs", "petg", "nylon",
-        "resin", "resina", "uv", "epoxy",
-        "printer", "impressora", "creality", "elegoo", "anycubic", "bambu", "sunlu",
-        "nozzle", "bico", "hotend", "extruder", "extrusora",
-        "build plate", "plataforma", "bed", "cama",
-        "parts", "peças", "component", "componente",
-        "fdm", "sla", "dlp", "lcd",
+        "filament", "filamento", "pla", "abs", "petg", "nylon", "asa", "tpu",
+        "resin", "resina", "uv", "epoxy", "photopolymer",
+        "printer", "impressora", "creality", "elegoo", "anycubic", "bambu", "sunlu", "jayo", "artillery", "voron", "ratrig",
+        "nozzle", "bico", "hotend", "extruder", "extrusora", "v6", "volcano", "sprite",
+        "build plate", "plataforma", "bed", "cama", "pei", "magnetic sheet",
+        "parts", "peças", "component", "componente", "linear rail", "trilho linear", "stepper motor", "motor de passo",
+        "fdm", "sla", "dlp", "lcd", "msla", "wash and cure", "curagem",
+        "3d print", "3d printing", "maker", "diy 3d"
     ]
     
     filtrados = []
@@ -557,47 +566,47 @@ def postar_promocao() -> None:
     produto_escolhido: dict | None = None
     keyword_usada = "Hot Products"
 
-    # Camada 1: Tenta buscar Hot Products (melhores ofertas gerais)
-    logger.info("Tentando buscar Hot Products do AliExpress...")
-    try:
-        # Categorias de eletrônicos/ferramentas costumam ter itens 3D
-        hot_produtos = buscar_hot_products_aliexpress()
-        if hot_produtos:
-            # Filtra por palavras-chave 3D para garantir relevância
-            filtrados = filtrar_por_preco(hot_produtos)
-            if filtrados:
-                produto_escolhido = random.choice(filtrados)
-                logger.info("✅ Produto escolhido via Hot Products (Filtrado)")
-    except Exception as e:
-        logger.error("Erro ao buscar Hot Products: %s", e)
+    # Camada 1: Busca específica por Keywords 3D (Mais assertivo)
+    logger.info("Iniciando busca prioritária por Keywords 3D...")
+    for _ in range(3): # Tenta as 3 próximas keywords da lista
+        keyword = KEYWORDS[_keyword_index % len(KEYWORDS)]
+        _keyword_index += 1
+        try:
+            todos = buscar_produtos_aliexpress(keyword)
+            if todos:
+                filtrados = filtrar_por_preco(todos)
+                if filtrados:
+                    # Prioriza o que tiver melhor desconto ou for mais relevante
+                    produto_escolhido = filtrados[0]
+                    keyword_usada = keyword
+                    logger.info("✅ Produto 3D encontrado via Keyword: %s", keyword)
+                    break
+        except Exception as e:
+            logger.error("Erro na busca por keyword '%s': %s", keyword, e)
 
-    # Camada 2: Se não achou em Hot Products, tenta via busca de keywords (como antes)
+    # Camada 2: Se não achou por keyword, tenta Hot Products com filtro rigoroso
     if not produto_escolhido:
-        for tentativa in range(min(5, len(KEYWORDS))): # Tenta as próximas 5 keywords
-            keyword = KEYWORDS[_keyword_index % len(KEYWORDS)]
-            _keyword_index += 1
-            logger.info("Buscando via keyword: '%s' (tentativa %d/5)", keyword, tentativa + 1)
-            try:
-                todos = buscar_produtos_aliexpress(keyword)
-                if todos:
-                    filtrados = filtrar_por_preco(todos)
-                    if filtrados:
-                        produto_escolhido = filtrados[0]
-                        keyword_usada = keyword
-                        break
-            except Exception as e:
-                logger.error("Erro na busca por keyword '%s': %s", keyword, e)
-                continue
+        logger.info("Tentando buscar Hot Products com filtro 3D...")
+        try:
+            hot_produtos = buscar_hot_products_aliexpress()
+            if hot_produtos:
+                filtrados = filtrar_por_preco(hot_produtos)
+                if filtrados:
+                    produto_escolhido = random.choice(filtrados)
+                    keyword_usada = "Hot Product 3D"
+                    logger.info("✅ Produto 3D encontrado via Hot Products")
+        except Exception as e:
+            logger.error("Erro ao buscar Hot Products: %s", e)
 
-    # Camada 3: Se ainda não achou, pega qualquer um da busca por keyword (sem filtro de categoria, mas com preço)
+    # Camada 3: Fallback final com busca aleatória por keyword (sem filtro rigoroso, apenas preço)
     if not produto_escolhido:
-        keyword = KEYWORDS[random.randint(0, len(KEYWORDS)-1)]
+        keyword = random.choice(KEYWORDS)
+        logger.info("Tentando fallback final com keyword aleatória: %s", keyword)
         todos = buscar_produtos_aliexpress(keyword)
         if todos:
-            # Pega o item com melhor avaliação ou menor preço
-            produto_escolhido = min(todos, key=lambda p: float(p.get("sale_price", 999999)))
-            keyword_usada = keyword
-            logger.info("✅ Produto escolhido via Fallback Keyword (Sem filtro 3D)")
+            produto_escolhido = todos[0]
+            keyword_usada = f"{keyword} (Fallback)"
+            logger.info("✅ Produto escolhido via Fallback")
 
     # Se finalmente encontrou algo, envia
     if produto_escolhido:
