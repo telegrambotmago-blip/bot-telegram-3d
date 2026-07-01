@@ -233,15 +233,25 @@ def _ali_request(metodo: str, parametros: dict) -> dict:
             **parametros,
         }
         
-        # Gerar assinatura MD5
-        sign_string = ALI_APP_SECRET.join(
-            [f"{k}{v}" for k, v in sorted(payload.items())]
-        )
+        # Gerar assinatura MD5 (formato correto: secret + parametros + secret)
+        # Ordenar os parâmetros e concatenar key=value&key=value...
+        sorted_params = sorted(payload.items())
+        sign_string = ALI_APP_SECRET + "".join([f"{k}{v}" for k, v in sorted_params]) + ALI_APP_SECRET
         payload["sign"] = hashlib.md5(sign_string.encode()).hexdigest().upper()
+        
+        logger.debug(f"API Request: {metodo} | Timestamp: {timestamp}")
         
         resp = requests.post(url, json=payload, timeout=10)
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        
+        # Verificar se houve erro na resposta
+        if "error_response" in data:
+            error_msg = data.get("error_response", {}).get("msg", "Erro desconhecido")
+            logger.error(f"Erro da API AliExpress: {error_msg}")
+            return {}
+        
+        return data
     except Exception as e:
         logger.error("Erro na API AliExpress (%s): %s", metodo, e)
         return {}
