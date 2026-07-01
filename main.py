@@ -767,38 +767,8 @@ def _executar_teste(nome: str, funcao) -> str:
 
 
 @bot.message_handler(commands=["testar", "start"])
-def cmd_menu_start_testar(message: telebot.types.Message) -> None:
+def cmd_menu(message: telebot.types.Message) -> None:
     logger.info("Comando recebido: /%s (user: %s)", message.text.lstrip("/").split()[0], message.from_user.id)
-    
-    # Se for ADMIN, mostra o menu principal (idêntico à imagem)
-    if _is_admin(message.from_user.id):
-        bot.send_message(
-            message.chat.id,
-            "🛠️ *Central de Controle Mago 3D*\nEscolha uma operação:",
-            parse_mode="Markdown",
-            reply_markup=_teclado_menu(),
-        )
-        return
-
-    # Se for usuário comum no /start
-    if message.text.startswith("/start"):
-        args = message.text.split()
-        if len(args) > 1 and args[1] == "sorteio":
-            cmd_participar(message)
-            return
-        
-        bot.send_message(
-            message.chat.id,
-            "👋 Olá! Sou o bot de promoções 3D.\n\n"
-            "Comandos disponíveis:\n"
-            "/participar — Participa do sorteio\n"
-            "/status — Vê o status do sorteio\n"
-            "/ajuda — Central de ajuda técnica\n",
-            parse_mode="Markdown"
-        )
-        return
-
-    # Se for /testar (apenas admin chega aqui pelo handler acima)
     bot.send_message(
         message.chat.id,
         "🧪 Modo de Teste — escolha o que disparar agora:",
