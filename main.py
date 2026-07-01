@@ -421,7 +421,7 @@ def _montar_e_enviar_produto(produto: dict, keyword: str) -> None:
 
     link_afiliado = gerar_link_afiliado(product_id) if product_id else None
     if not link_afiliado:
-        link_afiliado = link or f"https://www.aliexpress.com/wholesale?SearchText={keyword.replace(" ", "+")}"
+        link_afiliado = link or f"https://www.aliexpress.com/wholesale?SearchText={keyword.replace(' ', '+')}"
 
     # Gemini gera texto puro — escapamos para HTML antes de montar o template
     copy_raw    = gemini_copy_promocao(titulo, preco_original, preco_desconto)
